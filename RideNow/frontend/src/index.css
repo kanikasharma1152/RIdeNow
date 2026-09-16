@@ -1,0 +1,73 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply font-sans antialiased bg-[#05070A] text-[#F5F7FA] selection:bg-[#38BDF8]/30 selection:text-[#38BDF8];
+    background-color: #05070A;
+    color: #F5F7FA;
+  }
+}
+
+@layer components {
+  /* Reusable button styles using Tailwind */
+  .btn {
+    @apply inline-flex items-center justify-center px-4 py-2.5 font-medium rounded-xl transition-all duration-200 active:scale-[0.98] disabled:opacity-40 disabled:pointer-events-none;
+  }
+  
+  .btn-primary {
+    @apply bg-[#38BDF8] text-[#05070A] font-semibold hover:bg-[#5CC8FF] shadow-sm hover:shadow-[0_0_15px_rgba(56,189,248,0.4)];
+  }
+  
+  .btn-secondary {
+    @apply bg-[#101820] text-[#F5F7FA] border border-[#1E293B] hover:bg-[#15222E] hover:border-[#38BDF8]/40 shadow-sm;
+  }
+  
+  .btn-accent {
+    @apply bg-[#38BDF8] text-[#05070A] font-semibold hover:bg-[#5CC8FF] shadow-sm hover:shadow-[0_0_20px_rgba(56,189,248,0.5)];
+  }
+  
+  .btn-danger {
+    @apply bg-red-600/90 text-white hover:bg-red-600 shadow-sm hover:shadow-[0_0_15px_rgba(239,68,68,0.4)];
+  }
+
+  /* Form Inputs */
+  .input-field {
+    @apply w-full px-4 py-3 bg-[#0D141B] border border-[#1E293B] rounded-xl text-[#F5F7FA] placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-[#38BDF8]/30 focus:border-[#38BDF8] transition-all duration-200;
+  }
+
+  /* Cards */
+  .card {
+    @apply bg-[#0A0F14] rounded-2xl shadow-subtle border border-[#1E293B] transition-all duration-200;
+  }
+
+  .card-panel {
+    @apply bg-[#101820] rounded-2xl shadow-float border border-[#1E293B] transition-all duration-200;
+  }
+
+  .card-interactive {
+    @apply bg-[#0A0F14] rounded-2xl border border-[#1E293B] hover:border-[#38BDF8]/40 hover:bg-[#0D141B] transition-all duration-200 hover:shadow-float;
+  }
+
+  .page-enter { @apply animate-[page-enter_300ms_ease-out]; }
+
+  /* Map */
+  .leaflet-container {
+    @apply w-full h-full z-0 font-sans;
+    background: #0D141B !important;
+  }
+  
+  /* Hide scrollbars for clean UI */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+@keyframes page-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }

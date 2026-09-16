@@ -1,0 +1,26 @@
+import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Car, ChevronLeft, ChevronRight, Filter, Loader2, Play, Route, XCircle } from 'lucide-react';
+import { format } from 'date-fns';
+import { getDriverRideHistory } from '../../services/rideService';
+import { EmptyState, MetricCard, RouteBlock, StatusBadge } from '../../components/MobilityUI';
+
+const STATUS_TABS = [['All', ''], ['Assigned', 'ACCEPTED'], ['In progress', 'STARTED'], ['Completed', 'COMPLETED'], ['Cancelled', 'CANCELLED']];
+
+export default function DriverRides() {
+  const [rides, setRides] = useState([]); const [loading, setLoading] = useState(true); const [error, setError] = useState('');
+  const [status, setStatus] = useState(''); const [page, setPage] = useState(1); const [totalPages, setTotalPages] = useState(1); const [total, setTotal] = useState(0);
+  const load = useCallback(async () => { setLoading(true); setError(''); try { const data = await getDriverRideHistory({ page, page_size: 12, sort: 'newest', ...(status && { status }) }); setRides(data.items || []); setTotalPages(data.total_pages || 1); setTotal(data.total || 0); } catch { setError('We could not load your assigned rides. Please try again.'); } finally { setLoading(false); } }, [page, status]);
+  useEffect(() => { load(); }, [load]);
+  const changeStatus = value => { setStatus(value); setPage(1); };
+  return <div className="space-y-6 pb-10 animate-fade-in">
+    <section className="card-panel relative overflow-hidden p-6 md:p-8"><div className="absolute -right-20 -top-20 h-56 w-56 rounded-full bg-[#38BDF8]/5 blur-3xl" /><div className="relative flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#38BDF8]">Driver workspace</p><h2 className="mt-2 text-2xl font-bold text-white md:text-3xl">Assigned rides</h2><p className="mt-2 text-sm text-gray-400">Manage active dispatches and revisit completed journeys.</p></div><div className="rounded-xl border border-[#1E293B] bg-[#101820] px-4 py-3"><p className="text-[10px] uppercase tracking-wider text-gray-500">Rides recorded</p><p className="mt-1 text-xl font-bold text-white">{total}</p></div></div></section>
+    <div className="flex flex-wrap items-center gap-2"><Filter size={15} className="text-gray-500" />{STATUS_TABS.map(([label, value]) => <button key={value} onClick={() => changeStatus(value)} className={`rounded-full border px-3.5 py-2 text-xs font-semibold transition ${status === value ? 'border-[#38BDF8] bg-[#38BDF8] text-[#05070A]' : 'border-[#1E293B] bg-[#0A0F14] text-gray-400 hover:border-[#38BDF8]/40 hover:text-white'}`}>{label}</button>)}</div>
+    {error && <div className="flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-300"><XCircle size={18} />{error}</div>}
+    {loading ? <div className="card flex min-h-64 items-center justify-center gap-3 text-gray-400"><Loader2 className="animate-spin text-[#38BDF8]" />Loading rides…</div> : rides.length === 0 ? <EmptyState icon={Car} title={status ? 'No rides in this status' : 'No assigned rides yet'} detail="New dispatches will appear here as soon as they are available." action={<Link to="/driver/dashboard" className="btn btn-primary text-sm">Open dashboard</Link>} /> : <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">{rides.map(ride => {
+      const canStart = ride.status === 'ACCEPTED'; const canResume = ride.status === 'STARTED';
+      return <article key={ride.id} className="card-interactive flex min-w-0 flex-col p-5 hover:-translate-y-0.5"><div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">Ride #{ride.id}</p><p className="mt-1 text-xs text-gray-400">{ride.created_at ? format(new Date(ride.created_at), 'dd MMM · h:mm a') : 'Time unavailable'}</p></div><StatusBadge status={ride.status} /></div><div className="my-5"><RouteBlock pickup={ride.pickup_location} destination={ride.dropoff_location} /></div><div className="grid grid-cols-2 gap-3 border-t border-[#1E293B] pt-4"><MetricCard label="Distance" value={ride.distance_km ? `${Number(ride.distance_km).toFixed(1)} km` : '—'} icon={Route} /><MetricCard label="Fare" value={ride.fare != null ? `₹${Number(ride.fare).toFixed(2)}` : '—'} tone="emerald" /></div><div className="mt-5 flex gap-2"><Link className="btn btn-secondary flex-1 px-3 py-2 text-xs" to={`/driver/rides/${ride.id}`}>View ride</Link>{(canStart || canResume) && <Link className="btn btn-primary flex-1 px-3 py-2 text-xs" to={`/driver/rides/${ride.id}`}>{canStart ? <><Play size={13} /> Start ride</> : 'Continue ride'}</Link>}</div></article>;
+    })}</div>}
+    {!loading && totalPages > 1 && <div className="flex items-center justify-between"><p className="text-xs text-gray-500">Page {page} of {totalPages}</p><div className="flex gap-2"><button disabled={page === 1} onClick={() => setPage(p => p - 1)} className="btn btn-secondary px-3 py-2 text-xs"><ChevronLeft size={15} />Previous</button><button disabled={page === totalPages} onClick={() => setPage(p => p + 1)} className="btn btn-secondary px-3 py-2 text-xs">Next<ChevronRight size={15} /></button></div></div>}
+  </div>;
+}
