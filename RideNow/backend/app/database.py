@@ -1,6 +1,3 @@
-import os
-
-from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -8,17 +5,32 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-load_dotenv()
+from app.core.config import settings
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Ensure production configuration validation runs before database engine creation
+settings.validate_production_configuration()
 
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL is not set")
+DATABASE_URL = settings.DATABASE_URL
 
-engine = create_async_engine(
-    DATABASE_URL,
-    echo=True,
-)
+# Build engine kwargs — SQLite (used in tests) does not support connection pool
+# parameters; PostgreSQL/asyncpg does.
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+
+_engine_kwargs: dict = {
+    "echo": not settings.is_production,
+}
+
+if not _is_sqlite:
+    _engine_kwargs.update(
+        {
+            "pool_size": settings.DB_POOL_SIZE,
+            "max_overflow": settings.DB_MAX_OVERFLOW,
+            "pool_timeout": settings.DB_POOL_TIMEOUT,
+            "pool_recycle": settings.DB_POOL_RECYCLE,
+        }
+    )
+
+engine = create_async_engine(DATABASE_URL, **_engine_kwargs)
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
