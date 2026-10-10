@@ -4,6 +4,7 @@
 *.env
 production.env
 !.env.example
+!.env.production
 *.pem
 *.key
 credentials
