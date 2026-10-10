@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from app.database import get_db
 
@@ -12,6 +13,7 @@ from app.schemas.user import (
     UserResponse,
     UserUpdate,
     TokenResponse,
+    GoogleOAuthRequest,
 )
 
 from app.services.user import (
@@ -19,6 +21,8 @@ from app.services.user import (
     login_user,
     update_user_profile,
 )
+from app.services.oauth import authenticate_google_user
+from app.core.config import settings
 
 from typing import Callable
 
@@ -155,6 +159,21 @@ async def register(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    except IntegrityError as e:
+        # Duplicate phone or email constraint violation from PostgreSQL
+        err_str = str(e.orig).lower() if e.orig else str(e).lower()
+        if "phone" in err_str:
+            detail = "Phone number is already registered"
+        elif "email" in err_str:
+            detail = "Email address is already registered"
+        elif "oauth_sub" in err_str:
+            detail = "OAuth account already linked"
+        else:
+            detail = "An account with this information already exists"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+        )
 
 
 # ==========================================
@@ -187,6 +206,57 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
+        )
+
+
+# ==========================================
+# GOOGLE OAUTH
+# ==========================================
+
+@router.get(
+    "/oauth/google/config",
+    summary="Get Google OAuth Client Configuration",
+    description="Returns public client_id and configured status without exposing secrets.",
+)
+async def get_google_oauth_config():
+    client_id = settings.GOOGLE_CLIENT_ID
+    is_configured = bool(client_id and not client_id.startswith("your-") and len(client_id) > 10)
+    return {
+        "client_id": client_id if is_configured else None,
+        "configured": is_configured,
+    }
+
+
+@router.post(
+    "/oauth/google",
+    response_model=TokenResponse,
+    summary="Authenticate with Google OAuth",
+    description="Verifies Google ID token and returns application JWT bearer token.",
+)
+async def oauth_google(
+    payload: GoogleOAuthRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        user, access_token = await authenticate_google_user(
+            db=db,
+            credential=payload.credential,
+            requested_role=payload.role,
+        )
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user": user,
+        }
+    except AuthenticationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Google authentication failed: {str(e)}",
         )
 
 

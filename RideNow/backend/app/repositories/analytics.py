@@ -89,3 +89,33 @@ async def get_top_pickup_hotspots(db: AsyncSession, limit: int = 5) -> List[Dict
     )
     result = await db.execute(stmt)
     return [{"location": row.pickup_location, "count": row.ride_count} for row in result.all()]
+
+
+async def get_admin_fleet_drivers(db: AsyncSession, limit: int = 20) -> List[Dict[str, Any]]:
+    """Returns driver fleet list with user names, vehicle details, online status and current location."""
+    stmt = (
+        select(Driver, User.name, User.phone)
+        .join(User, Driver.user_id == User.id)
+        .order_by(desc(Driver.is_online), desc(Driver.id))
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+    drivers = []
+    for driver, name, phone in rows:
+        drivers.append({
+            "id": driver.id,
+            "user_id": driver.user_id,
+            "name": name or f"Captain #{driver.id}",
+            "phone": phone,
+            "vehicle_type": driver.vehicle_type,
+            "vehicle_number": driver.vehicle_number,
+            "vehicle_model": driver.vehicle_model,
+            "is_online": bool(driver.is_online),
+            "is_available": bool(driver.is_available),
+
+            "latitude": driver.latitude,
+            "longitude": driver.longitude,
+            "location_updated_at": driver.location_updated_at.isoformat() if driver.location_updated_at else None,
+        })
+    return drivers

@@ -71,7 +71,8 @@ class Ride(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
-        nullable=False
+        nullable=False,
+        index=True
     )
 
     started_at: Mapped[datetime | None] = mapped_column(

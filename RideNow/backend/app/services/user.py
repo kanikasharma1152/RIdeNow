@@ -45,6 +45,14 @@ async def register_user(
     if existing_user:
         raise ValueError("Email already registered")
 
+    if phone:
+        existing_phone = await get_user_by_phone(
+            db,
+            phone
+        )
+        if existing_phone:
+            raise ValueError("Phone number already registered")
+
     password_hash_value = hash_password(password)
 
     user = await create_user(
@@ -55,6 +63,10 @@ async def register_user(
         password_hash=password_hash_value,
         role=role
     )
+
+    if role == "driver":
+        from app.services.driver import get_or_create_driver
+        await get_or_create_driver(db, user.id)
 
     return user
 

@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,21 +16,24 @@ class RideCreate(BaseModel):
 class RideResponse(BaseModel):
     id: int
     passenger_id: int
-    driver_id: int | None
+    driver_id: Optional[int] = None
     pickup_location: str
     dropoff_location: str
     distance_km: float
 
     status: str
-    fare: Decimal | None
+    fare: Optional[Decimal] = None
     created_at: datetime
-    started_at: datetime | None
-    completed_at: datetime | None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    pickup_latitude: Optional[float] = None
+    pickup_longitude: Optional[float] = None
+
+    # Enriched driver info populated by service layer when driver is assigned
+    driver_info: Optional[dict[str, Any]] = None
 
     model_config = ConfigDict(from_attributes=True)
-
-    pickup_latitude: float | None
-    pickup_longitude: float | None
 
 
 class RideRejectionResponse(BaseModel):

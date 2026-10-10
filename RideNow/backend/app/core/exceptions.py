@@ -130,3 +130,29 @@ class RatingError(RideNowError):
 
     def __init__(self, message: str = "Rating error"):
         super().__init__(message)
+
+
+# ─── Phase 14 additions ───────────────────────────────────────────────────────
+
+class UnauthorizedAccessError(RideNowError):
+    status_code = 403
+    error_code = "UNAUTHORIZED_ACCESS"
+
+    def __init__(self, message: str = "Access denied"):
+        super().__init__(message)
+
+
+class ServiceUnavailableError(RideNowError):
+    status_code = 503
+    error_code = "SERVICE_UNAVAILABLE"
+
+    def __init__(self, message: str = "Service temporarily unavailable"):
+        super().__init__(message)
+
+
+class RateLimitError(RideNowError):
+    status_code = 429
+    error_code = "RATE_LIMIT_EXCEEDED"
+
+    def __init__(self, message: str = "Too many requests. Please wait a moment."):
+        super().__init__(message)

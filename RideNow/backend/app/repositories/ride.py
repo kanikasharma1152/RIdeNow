@@ -180,6 +180,23 @@ async def get_requested_rides_excluding_drivers(
     return result.scalar_one_or_none()
 
 
+async def get_active_ride_for_passenger(
+    db: AsyncSession,
+    passenger_id: int,
+):
+    """Return the most recent active ride for a passenger, or None."""
+    result = await db.execute(
+        select(Ride)
+        .where(
+            Ride.passenger_id == passenger_id,
+            Ride.status.in_(["REQUESTED", "ACCEPTED", "STARTED"]),
+        )
+        .order_by(Ride.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def assign_driver(
     db: AsyncSession,
     ride: Ride,

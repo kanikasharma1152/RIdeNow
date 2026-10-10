@@ -49,7 +49,8 @@ class Driver(Base):
     is_online: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
-        nullable=False
+        nullable=False,
+        index=True
     )
 
     is_available: Mapped[bool] = mapped_column(
