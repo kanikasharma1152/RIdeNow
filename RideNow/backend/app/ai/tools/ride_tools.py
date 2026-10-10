@@ -52,7 +52,7 @@ async def get_active_ride_tool(
                 "message": "You currently have no active ride in progress.",
             }
 
-        return {
+        resp = {
             "has_active_ride": True,
             "ride_id": active.id,
             "status": active.status,
@@ -62,6 +62,33 @@ async def get_active_ride_tool(
             "fare": float(active.fare) if active.fare else None,
             "created_at": str(active.created_at),
         }
+
+        # If driver assigned, enrich with vehicle and live telemetry
+        if active.driver_id:
+            try:
+                from app.repositories.driver import get_driver_by_id
+                driver = await get_driver_by_id(db, active.driver_id)
+                if driver:
+                    resp["driver_id"] = driver.id
+                    resp["vehicle_model"] = driver.vehicle_model or "RideNow Sedan"
+                    resp["vehicle_number"] = driver.vehicle_number or ""
+                    resp["vehicle_type"] = driver.vehicle_type or "sedan"
+                    if driver.latitude is not None and driver.longitude is not None:
+                        resp["driver_latitude"] = driver.latitude
+                        resp["driver_longitude"] = driver.longitude
+                        resp["driver_location_available"] = True
+                        if active.pickup_latitude is not None and active.pickup_longitude is not None:
+                            from app.services.ride import _haversine
+                            dist_to_pickup = _haversine(
+                                driver.latitude, driver.longitude,
+                                active.pickup_latitude, active.pickup_longitude,
+                            )
+                            resp["driver_distance_to_pickup_km"] = round(dist_to_pickup, 2)
+                            resp["driver_eta_minutes"] = max(1, round(dist_to_pickup * 3))
+            except Exception:
+                pass
+
+        return resp
     except RideNowError as exc:
         return {"has_active_ride": False, "error": exc.message}
     except Exception as exc:
@@ -136,10 +163,15 @@ async def estimate_fare_tool(
                     "message": "Unable to find coordinates for the provided addresses. Please be more specific.",
                 }
 
+            pick_lat = pick_coords["latitude"] if isinstance(pick_coords, dict) else pick_coords[0]
+            pick_lon = pick_coords["longitude"] if isinstance(pick_coords, dict) else pick_coords[1]
+            drop_lat = drop_coords["latitude"] if isinstance(drop_coords, dict) else drop_coords[0]
+            drop_lon = drop_coords["longitude"] if isinstance(drop_coords, dict) else drop_coords[1]
+
             # Calculate route distance via OSRM
             calc_distance = await calculate_route_distance(
-                pick_coords[0], pick_coords[1],
-                drop_coords[0], drop_coords[1],
+                pick_lat, pick_lon,
+                drop_lat, drop_lon,
             )
 
         fare = calculate_fare(calc_distance)

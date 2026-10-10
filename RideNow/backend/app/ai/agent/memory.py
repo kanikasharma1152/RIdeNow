@@ -57,6 +57,11 @@ async def append_message_to_history(user_id: int, role: str, content: str):
 
 
 async def clear_conversation_history(user_id: int):
-    """Clear chat history for a user."""
+    """Clear chat history and structured conversation context for a user."""
     client = get_redis_client()
     await client.delete(_get_history_key(user_id))
+    try:
+        from app.ai.agent.context import clear_user_context
+        await clear_user_context(user_id)
+    except Exception as exc:
+        logger.warning(f"Could not clear structured context for user {user_id}: {exc}")

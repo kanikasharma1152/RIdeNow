@@ -15,6 +15,7 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 # Expose initial core capabilities via MCP standard inputSchema format
 MCP_TOOL_NAMES = {
     "get_active_ride",
+    "book_ride",
     "estimate_fare",
     "get_ride_history",
     "get_user_profile",
@@ -25,7 +26,17 @@ MCP_TOOL_NAMES = {
     "get_driver_summary",
     "get_route_tip",
     "search_policies_and_faq",
+    "get_ride_safety_events",
+    "get_my_safety_summary",
+    "get_demand_forecast",
+    "get_eta_prediction",
+    "get_smart_pickup_points",
+    "get_trip_plan",
+    "get_user_mobility_summary",
+    "get_ride_recommendation",
+    "get_driver_matching_explanation",
 }
+
 
 MCP_TOOL_SPECS: List[Dict[str, Any]] = []
 for tool in TOOL_DEFINITIONS:

@@ -100,7 +100,7 @@ def ingest_all_knowledge(force_reload: bool = False) -> int:
         return 0
 
     all_chunks = []
-    for md_file in KNOWLEDGE_DIR.glob("*.md"):
+    for md_file in sorted(KNOWLEDGE_DIR.rglob("*.md")):
         chunks = chunk_markdown_file(md_file)
         all_chunks.extend(chunks)
 

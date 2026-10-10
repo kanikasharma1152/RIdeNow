@@ -90,11 +90,17 @@ class GroqProvider(BaseLLMProvider):
         FALLBACK_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
         models_to_try = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
 
+        import asyncio
+        timeout_sec = getattr(settings, "GROQ_TIMEOUT_SECONDS", 30.0)
+
         last_exc = None
         for candidate_model in models_to_try:
             kwargs["model"] = candidate_model
             try:
-                response = await client.chat.completions.create(**kwargs)
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(**kwargs),
+                    timeout=timeout_sec,
+                )
                 if candidate_model != self.model:
                     logger.warning(f"Groq model '{self.model}' was unavailable; successfully switched to '{candidate_model}'.")
                     self.model = candidate_model

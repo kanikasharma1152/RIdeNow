@@ -20,6 +20,22 @@ from app.ai.tools.ride_tools import (
     estimate_fare_tool,
     cancel_ride_tool,
 )
+from app.ai.tools.booking_tools import book_ride_tool
+from app.ai.tools.safety_tools import (
+    get_ride_safety_events_tool,
+    get_my_safety_summary_tool,
+    get_safety_center_tool,
+    get_active_safety_events_tool,
+    create_safety_event_tool,
+    trigger_sos_tool,
+    get_trusted_contacts_tool,
+    create_trusted_contact_tool,
+    delete_trusted_contact_tool,
+    prepare_ride_share_tool,
+    get_driver_live_location_tool,
+    get_vehicle_details_tool,
+    get_route_deviation_status_tool,
+)
 from app.ai.tools.driver_tools import (
     get_driver_status_tool,
     get_driver_earnings_tool,
@@ -33,6 +49,15 @@ from app.ai.tools.extra_tools import (
     mark_notification_read_tool,
     get_rating_tool,
     get_payment_status_tool,
+)
+from app.ai.tools.mobility_tools import (
+    get_demand_forecast_tool,
+    get_eta_prediction_tool,
+    get_smart_pickup_points_tool,
+    get_trip_plan_tool,
+    get_user_mobility_summary_tool,
+    get_ride_recommendation_tool,
+    get_driver_matching_explanation_tool,
 )
 
 logger = logging.getLogger(__name__)
@@ -179,6 +204,271 @@ TOOL_DEFINITIONS = [
         },
         "allowed_roles": ["passenger", "driver"],
     },
+    {
+        "name": "book_ride",
+        "description": "Book a new ride for the passenger. When confirmed=false, calculates route and returns fare summary asking user for confirmation. When confirmed=true, creates the trip and initiates driver matching.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pickup_location": {"type": "string", "description": "Street address or landmark where passenger will be picked up."},
+                "dropoff_location": {"type": "string", "description": "Destination street address or landmark."},
+                "confirmed": {"type": "boolean", "description": "Set to true only after passenger explicitly confirms the booking (e.g. 'yes', 'confirm', 'book it').", "default": False},
+                "pickup_latitude": {"type": "number", "description": "Optional GPS latitude of pickup."},
+                "pickup_longitude": {"type": "number", "description": "Optional GPS longitude of pickup."},
+                "dropoff_latitude": {"type": "number", "description": "Optional GPS latitude of dropoff."},
+                "dropoff_longitude": {"type": "number", "description": "Optional GPS longitude of dropoff."},
+            },
+            "required": ["dropoff_location"],
+        },
+        "allowed_roles": ["passenger"],
+    },
+    {
+        "name": "get_ride_safety_events",
+        "description": "Fetch safety events, route notices, or active SOS status for a specific trip by its ride_id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ride_id": {"type": "integer", "description": "The ride ID to check safety events for."}
+            },
+            "required": ["ride_id"],
+        },
+        "allowed_roles": ["passenger", "driver", "admin"],
+    },
+    {
+        "name": "get_my_safety_summary",
+        "description": "Fetch a summary of safety events and status across the user's recent trips.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver", "admin"],
+    },
+    {
+        "name": "get_safety_center",
+        "description": "Retrieve the user's Safety Command Center overview, including active ride status, driver/vehicle details, trusted contacts, and capability boundaries.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver", "admin"],
+    },
+    {
+        "name": "get_active_safety_events",
+        "description": "Retrieve all open/active safety events or notices involving the user.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver", "admin"],
+    },
+    {
+        "name": "create_safety_event",
+        "description": "Report a safety concern (e.g. ROUTE_DEVIATION, DRIVER_BEHAVIOR, VEHICLE_ISSUE, or GENERAL_CONCERN).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_type": {"type": "string", "description": "Type of event (SAFETY_CONCERN, ROUTE_DEVIATION, PICKUP_MISMATCH, VEHICLE_ISSUE)"},
+                "severity": {"type": "string", "description": "Severity: LOW, MEDIUM, HIGH, CRITICAL", "default": "MEDIUM"},
+                "description": {"type": "string", "description": "Details of the safety concern"},
+                "ride_id": {"type": "integer", "description": "Optional associated ride ID"},
+            },
+            "required": ["event_type", "description"],
+        },
+        "allowed_roles": ["passenger", "driver"],
+    },
+    {
+        "name": "trigger_sos",
+        "description": "Activate internal emergency SOS safety event. Alert platform command center.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string", "description": "Emergency note or details"},
+                "ride_id": {"type": "integer", "description": "Optional active ride ID"},
+            },
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver"],
+    },
+    {
+        "name": "get_trusted_contacts",
+        "description": "Retrieve list of emergency trusted contacts configured by the user.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver"],
+    },
+    {
+        "name": "create_trusted_contact",
+        "description": "Add a new trusted contact for emergency trip sharing and notifications.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Contact full name"},
+                "phone": {"type": "string", "description": "Contact phone number with area/country code"},
+                "relationship": {"type": "string", "description": "Relationship e.g. Mother, Father, Friend, Partner"},
+            },
+            "required": ["name", "phone"],
+        },
+        "allowed_roles": ["passenger", "driver"],
+    },
+    {
+        "name": "delete_trusted_contact",
+        "description": "Remove an existing trusted contact by ID.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contact_id": {"type": "integer", "description": "ID of trusted contact to remove"},
+            },
+            "required": ["contact_id"],
+        },
+        "allowed_roles": ["passenger", "driver"],
+    },
+    {
+        "name": "prepare_ride_share",
+        "description": "Generate privacy-preserving live tracking link and formatted trip status text to share with family or friends.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ride_id": {"type": "integer", "description": "Optional ride ID to share (defaults to current active ride)"},
+            },
+            "required": [],
+        },
+        "allowed_roles": ["passenger"],
+    },
+    {
+        "name": "get_driver_live_location",
+        "description": "Get real-time GPS coordinates and ETA of assigned driver for active trip.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "allowed_roles": ["passenger"],
+    },
+    {
+        "name": "get_vehicle_details",
+        "description": "Retrieve exact vehicle model, license plate number, and driver name for the current active ride.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "allowed_roles": ["passenger"],
+    },
+    {
+        "name": "get_route_deviation_status",
+        "description": "Check if current trip vehicle has diverted away from expected planned route corridor.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ride_id": {"type": "integer", "description": "Optional ride ID"},
+            },
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver"],
+    },
+    {
+        "name": "get_demand_forecast",
+        "description": "Fetch real-time zone demand level (LOW/MEDIUM/HIGH), demand score, and traffic multiplier for a location.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "Street address, area, or landmark name"},
+                "latitude": {"type": "number", "description": "Optional GPS latitude"},
+                "longitude": {"type": "number", "description": "Optional GPS longitude"},
+            },
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver", "admin", "public"],
+    },
+    {
+        "name": "get_eta_prediction",
+        "description": "Calculate estimated travel duration (minutes) and distance between pickup and dropoff factoring in live traffic congestion.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pickup_location": {"type": "string", "description": "Origin location or landmark"},
+                "dropoff_location": {"type": "string", "description": "Destination location or landmark"},
+                "pickup_latitude": {"type": "number", "description": "Optional pickup GPS latitude"},
+                "pickup_longitude": {"type": "number", "description": "Optional pickup GPS longitude"},
+                "dropoff_latitude": {"type": "number", "description": "Optional dropoff GPS latitude"},
+                "dropoff_longitude": {"type": "number", "description": "Optional dropoff GPS longitude"},
+            },
+            "required": ["dropoff_location"],
+        },
+        "allowed_roles": ["passenger", "driver", "admin", "public"],
+    },
+    {
+        "name": "get_smart_pickup_points",
+        "description": "Suggest convenient curbside and landmark pickup spots near a location that reduce driver search time and walking effort.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "Location or landmark name"},
+                "latitude": {"type": "number", "description": "Optional GPS latitude"},
+                "longitude": {"type": "number", "description": "Optional GPS longitude"},
+            },
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver", "admin", "public"],
+    },
+    {
+        "name": "get_trip_plan",
+        "description": "Plan a journey with calculated target departure time (to meet arrival deadline), estimated travel duration, traffic congestion, and fare estimate. Does NOT auto-book.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "destination": {"type": "string", "description": "Destination address or landmark"},
+                "origin": {"type": "string", "description": "Starting address or landmark (defaults to current location)"},
+                "target_arrival_time": {"type": "string", "description": "Desired arrival time (e.g. '8:00 PM', '14:30', '9 AM')"},
+                "preferred_departure_time": {"type": "string", "description": "Optional departure time if planning ahead"},
+            },
+            "required": ["destination"],
+        },
+        "allowed_roles": ["passenger", "driver", "admin", "public"],
+    },
+    {
+        "name": "get_user_mobility_summary",
+        "description": "Retrieve personal travel analytics for the authenticated user, including total spend (INR), completed ride count, top destinations, and preferred travel hours.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver", "admin"],
+    },
+    {
+        "name": "get_ride_recommendation",
+        "description": "Get proactive advice on optimal departure times, peak traffic avoidance, and smart pickup points for a destination.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "destination": {"type": "string", "description": "Destination address or landmark"},
+                "origin": {"type": "string", "description": "Starting location (defaults to current location)"},
+                "target_time": {"type": "string", "description": "Optional planned departure or arrival time"},
+            },
+            "required": ["destination"],
+        },
+        "allowed_roles": ["passenger", "driver", "admin", "public"],
+    },
+    {
+        "name": "get_driver_matching_explanation",
+        "description": "Explain how RideNow's ML Smart Match algorithm ranks and pairs drivers (distance, congestion ETA, rating, acceptance rate) and check nearby availability.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pickup_latitude": {"type": "number", "description": "Optional pickup latitude"},
+                "pickup_longitude": {"type": "number", "description": "Optional pickup longitude"},
+            },
+            "required": [],
+        },
+        "allowed_roles": ["passenger", "driver", "admin", "public"],
+    },
 ] + COPILOT_TOOL_DEFINITIONS + ADMIN_TOOL_DEFINITIONS
 
 TOOL_FUNCTIONS = {
@@ -186,6 +476,7 @@ TOOL_FUNCTIONS = {
     "get_ride_history": get_ride_history_tool,
     "estimate_fare": estimate_fare_tool,
     "cancel_ride": cancel_ride_tool,
+    "book_ride": book_ride_tool,
     "get_driver_status": get_driver_status_tool,
     "get_driver_earnings": get_driver_earnings_tool,
     "search_policies_and_faq": search_policies_and_faq_tool,
@@ -194,9 +485,41 @@ TOOL_FUNCTIONS = {
     "mark_notification_read": mark_notification_read_tool,
     "get_rating": get_rating_tool,
     "get_payment_status": get_payment_status_tool,
+    "get_ride_safety_events": get_ride_safety_events_tool,
+    "get_my_safety_summary": get_my_safety_summary_tool,
+    "get_safety_center": get_safety_center_tool,
+    "get_safety_center_tool": get_safety_center_tool,
+    "get_active_safety_events": get_active_safety_events_tool,
+    "get_active_safety_events_tool": get_active_safety_events_tool,
+    "create_safety_event": create_safety_event_tool,
+    "create_safety_event_tool": create_safety_event_tool,
+    "trigger_sos": trigger_sos_tool,
+    "trigger_sos_tool": trigger_sos_tool,
+    "get_trusted_contacts": get_trusted_contacts_tool,
+    "get_trusted_contacts_tool": get_trusted_contacts_tool,
+    "create_trusted_contact": create_trusted_contact_tool,
+    "create_trusted_contact_tool": create_trusted_contact_tool,
+    "delete_trusted_contact": delete_trusted_contact_tool,
+    "delete_trusted_contact_tool": delete_trusted_contact_tool,
+    "prepare_ride_share": prepare_ride_share_tool,
+    "prepare_ride_share_tool": prepare_ride_share_tool,
+    "get_driver_live_location": get_driver_live_location_tool,
+    "get_driver_live_location_tool": get_driver_live_location_tool,
+    "get_vehicle_details": get_vehicle_details_tool,
+    "get_vehicle_details_tool": get_vehicle_details_tool,
+    "get_route_deviation_status": get_route_deviation_status_tool,
+    "get_route_deviation_status_tool": get_route_deviation_status_tool,
+    "get_demand_forecast": get_demand_forecast_tool,
+    "get_eta_prediction": get_eta_prediction_tool,
+    "get_smart_pickup_points": get_smart_pickup_points_tool,
+    "get_trip_plan": get_trip_plan_tool,
+    "get_user_mobility_summary": get_user_mobility_summary_tool,
+    "get_ride_recommendation": get_ride_recommendation_tool,
+    "get_driver_matching_explanation": get_driver_matching_explanation_tool,
     **COPILOT_TOOL_FUNCTIONS,
     **ADMIN_TOOL_FUNCTIONS,
 }
+
 
 
 def get_available_tools_for_role(role: str) -> List[Dict[str, Any]]:

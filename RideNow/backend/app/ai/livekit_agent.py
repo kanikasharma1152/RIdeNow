@@ -99,10 +99,64 @@ def create_voice_tools(current_user: User) -> List[Any]:
             
             res = await execute_tool("estimate_fare", args, current_user, db)
             if res.get("success"):
+                from app.ai.agent.context import update_user_context
+                fare_val = float(str(res.get("estimated_fare", "0")).replace("₹", "")) if res.get("estimated_fare") else None
+                await update_user_context(current_user.id, {
+                    "destination": dropoff_address or None,
+                    "pickup": pickup_address or None,
+                    "distance_km": res.get("distance_km"),
+                    "estimated_fare": fare_val,
+                }, role=current_user.role)
                 return f"Estimated fare for {res.get('distance_km')} kilometers is {res.get('estimated_fare')}. Base fare is 50 rupees plus 12 rupees per kilometer."
             return f"Could not estimate fare: {res.get('message', 'invalid parameters')}"
 
     tools.append(estimate_fare)
+
+    # 2b. Book Ride Tool (Voice)
+    @llm.function_tool
+    async def book_ride(dropoff_location: str = "", pickup_location: str = "", confirmed: bool = False) -> str:
+        """Book a ride or request a trip plan. If confirmed is false, calculates fare and asks user to confirm. If confirmed is true, books the ride."""
+        async with AsyncSessionLocal() as db:
+            from app.ai.agent.context import get_user_context, update_user_context, set_pending_action, clear_pending_action
+            ctx = await get_user_context(current_user.id, role=current_user.role)
+            final_dropoff = dropoff_location.strip() or ctx.destination
+            final_pickup = pickup_location.strip() or ctx.pickup or "your current location"
+
+            if not final_dropoff:
+                return "Where would you like to travel? Please tell me your destination."
+
+            res = await execute_tool("book_ride", {
+                "pickup_location": final_pickup,
+                "dropoff_location": final_dropoff,
+                "confirmed": confirmed,
+            }, current_user, db)
+
+            if res.get("requires_confirmation"):
+                fare_val = float(str(res.get("estimated_fare", "0")).replace("₹", "")) if res.get("estimated_fare") else None
+                await set_pending_action(current_user.id, "BOOK_RIDE", {
+                    "pickup_location": final_pickup,
+                    "dropoff_location": final_dropoff,
+                }, role=current_user.role)
+                await update_user_context(current_user.id, {
+                    "destination": final_dropoff,
+                    "pickup": final_pickup,
+                    "distance_km": res.get("distance_km"),
+                    "estimated_fare": fare_val,
+                }, role=current_user.role)
+                return f"Estimated fare to {final_dropoff} is {res.get('estimated_fare')} for {res.get('distance_km')} kilometers. Should I confirm and book this ride?"
+
+            if res.get("success"):
+                await clear_pending_action(current_user.id, role=current_user.role)
+                await update_user_context(current_user.id, {
+                    "active_ride_id": res.get("ride_id"),
+                    "active_ride_status": res.get("status", "REQUESTED"),
+                    "driver_id": res.get("driver_id"),
+                }, role=current_user.role)
+                return f"Your ride #{res.get('ride_id')} to {res.get('dropoff')} has been confirmed and booked! A driver is being assigned."
+
+            return res.get("error") or res.get("message") or "Unable to book ride."
+
+    tools.append(book_ride)
 
     # 3. Ride History Tool
     @llm.function_tool
@@ -189,6 +243,108 @@ def create_voice_tools(current_user: User) -> List[Any]:
             return "Could not retrieve rating details."
 
     tools.append(get_rating)
+
+    # 9. Safety: Safety Center Overview
+    @llm.function_tool
+    async def get_safety_center() -> str:
+        """Get the current safety status, active ride safety info, and available protections."""
+        async with AsyncSessionLocal() as db:
+            res = await execute_tool("get_safety_center_tool", {}, current_user, db)
+            if res.get("success"):
+                sc = res.get("safety_center", {})
+                contacts_count = sc.get("trusted_contacts_count", 0)
+                active_ride = sc.get("active_ride")
+                ride_bit = ""
+                if active_ride:
+                    ride_bit = f" Active ride #{active_ride.get('ride_id')} with driver {active_ride.get('driver_name', 'assigned')}."
+                return f"Safety shield is active. You have {contacts_count} trusted contacts configured.{ride_bit} Available actions: SOS, Share Ride, Vehicle Details."
+            return "Safety center is active and monitoring your ride."
+
+    tools.append(get_safety_center)
+
+    # 10. Safety: SOS Trigger
+    @llm.function_tool
+    async def trigger_sos() -> str:
+        """Trigger an emergency SOS alert. This logs a critical safety event and notifies the RideNow safety team. It does NOT contact police or ambulance."""
+        async with AsyncSessionLocal() as db:
+            res = await execute_tool("trigger_sos_tool", {"trigger_type": "VOICE_SOS"}, current_user, db)
+            sos = res.get("sos", {})
+            event_id = sos.get("event_id") or res.get("event_id", "N/A")
+            return (
+                f"SOS emergency event #{event_id} has been activated and the safety team has been notified. "
+                f"Important: RideNow cannot contact police or ambulance directly. "
+                f"Please call one-one-two immediately for emergency services."
+            )
+
+    tools.append(trigger_sos)
+
+    # 11. Safety: Share Ride
+    @llm.function_tool
+    async def prepare_ride_share(ride_id: int = 0) -> str:
+        """Generate a shareable live ride tracking link for trusted contacts. The link is NOT automatically sent — user must share it manually."""
+        async with AsyncSessionLocal() as db:
+            from app.ai.agent.context import get_user_context
+            ctx = await get_user_context(current_user.id, role=current_user.role)
+            actual_ride_id = ride_id or ctx.active_ride_id
+            if not actual_ride_id:
+                active_res = await execute_tool("get_active_ride", {}, current_user, db)
+                actual_ride_id = active_res.get("ride_id")
+            if not actual_ride_id:
+                return "You do not have an active ride to share right now."
+            res = await execute_tool("prepare_ride_share_tool", {"ride_id": actual_ride_id}, current_user, db)
+            share = res.get("share", {})
+            share_url = share.get("share_url") or res.get("share_url", "")
+            return (
+                f"A ride share link has been created. The link is {share_url}. "
+                f"Please copy and share it manually with your trusted contacts. "
+                f"The link has not been sent automatically."
+            )
+
+    tools.append(prepare_ride_share)
+
+    # 12. Safety: Vehicle Details
+    @llm.function_tool
+    async def get_vehicle_details(ride_id: int = 0) -> str:
+        """Get the driver name, vehicle model, and license plate number for the current ride."""
+        async with AsyncSessionLocal() as db:
+            from app.ai.agent.context import get_user_context
+            ctx = await get_user_context(current_user.id, role=current_user.role)
+            actual_ride_id = ride_id or ctx.active_ride_id
+            if not actual_ride_id:
+                active_res = await execute_tool("get_active_ride", {}, current_user, db)
+                actual_ride_id = active_res.get("ride_id")
+            if not actual_ride_id:
+                return "No active ride found with an assigned driver."
+            res = await execute_tool("get_vehicle_details_tool", {"ride_id": actual_ride_id}, current_user, db)
+            v = res.get("vehicle", {})
+            d = res.get("driver", {})
+            return (
+                f"Your driver is {d.get('name', 'Assigned Driver')} with rating {d.get('rating', 'not available')}. "
+                f"The vehicle is a {v.get('model', 'standard vehicle')}, type {v.get('type', 'standard')}, "
+                f"with plate number {v.get('number', 'not available')}. "
+                f"Please verify this at your pickup point."
+            )
+
+    tools.append(get_vehicle_details)
+
+    # 13. Safety: Report Concern
+    @llm.function_tool
+    async def report_safety_concern(description: str) -> str:
+        """Report a safety concern or suspicious activity during a ride. This logs a HIGH severity safety event."""
+        async with AsyncSessionLocal() as db:
+            res = await execute_tool("create_safety_event_tool", {
+                "event_type": "USER_REPORTED_CONCERN",
+                "severity": "HIGH",
+                "description": description,
+            }, current_user, db)
+            event = res.get("event", {})
+            event_id = event.get("id") or res.get("id", "N/A")
+            return (
+                f"Safety concern #{event_id} has been logged and the safety team has been alerted. "
+                f"If you feel in immediate danger, please trigger SOS or call one-one-two for emergency services."
+            )
+
+    tools.append(report_safety_concern)
 
     # 6. Driver specific tools (only if current_user.role == 'driver')
     if current_user.role == "driver":
@@ -321,7 +477,7 @@ async def entrypoint(ctx: JobContext):
     # Register event handlers for structured log output
     @session.on("agent_state_changed")
     def on_state_changed(evt) -> None:
-        logger.info(f"[VOICE AGENT] state: {evt.old_state} → {evt.new_state}")
+        logger.info(f"[VOICE AGENT] state: {evt.old_state} -> {evt.new_state}")
 
     @session.on("user_input_transcribed")
     def on_transcript(evt) -> None:
@@ -347,9 +503,18 @@ async def entrypoint(ctx: JobContext):
     await session.say(greeting_text)
     logger.info("[VOICE AGENT] greeting completed — waiting for user")
     # AgentSession runs its own background tasks (audio forwarding, VAD, LLM loop).
-    # The entrypoint must NOT return immediately or those tasks are cancelled.
-    # We await a never-resolving Future so the job stays alive until LiveKit closes it.
-    await asyncio.get_event_loop().create_future()
+    # Wait until the session closes (e.g. participant disconnects) or shutdown is called.
+    close_event = asyncio.Event()
+
+    @session.on("close")
+    def on_session_close(evt):
+        logger.info(f"[VOICE AGENT] AgentSession closed ({getattr(evt, 'reason', 'normal')}), exiting entrypoint")
+        close_event.set()
+
+    ctx.add_shutdown_callback(lambda: close_event.set())
+
+    await close_event.wait()
+    logger.info("[VOICE AGENT] Entrypoint finished cleanly")
 
 
 def main():

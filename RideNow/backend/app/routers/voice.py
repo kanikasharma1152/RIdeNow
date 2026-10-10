@@ -48,7 +48,15 @@ async def get_voice_token(
             detail="Voice interface is currently not configured or disabled on this server.",
         )
 
-    room_name = request.room_name or f"ridenow-voice-{current_user.id}"
+    # Each session MUST use a unique room name.
+    # Reusing the same room (e.g. "ridenow-voice-25") causes the old agent job
+    # — blocked on asyncio.create_future() — to remain in the room.  The
+    # LiveKit worker sees the room still occupied and does NOT dispatch a new
+    # agent job for the reconnecting client, so the second connection is silent.
+    # A UUID suffix guarantees a brand-new room (and therefore a brand-new agent
+    # job) on every connection, while still namespacing by user.
+    import uuid
+    room_name = request.room_name or f"ridenow-voice-{current_user.id}-{uuid.uuid4().hex[:8]}"
 
     try:
         data = generate_voice_token(
