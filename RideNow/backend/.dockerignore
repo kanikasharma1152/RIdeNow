@@ -1,0 +1,54 @@
+# ── Virtual Environments ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+
+# ── Python Cache & Bytecode ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ── Testing & Coverage Artifacts ──────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Version Control & IDE ─────────────────────────────────────────────────────
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# ── Environment & Local Secrets ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Logs & Temporary Files ────────────────────────────────────────────────────
+*.log
+logs/
+scratch/
+.DS_Store
+Thumbs.db
+
+# ── Build & Packaging ─────────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+
+# ── Local ChromaDB data ────────────────────────────────────────────────────────
+# The RAG database is provided via a Docker named volume at runtime.
+# Never bake local chroma_db data into the image — it is machine-specific.
+chroma_db/
+
+# ── Phase reports & dev scripts ───────────────────────────────────────────────
+phase15*.py
+phase15*.json
+phase14*.py
+check_admin.py
+seed_admin.py
+
+# ── Temporary / session files ─────────────────────────────────────────────────
+*.ses

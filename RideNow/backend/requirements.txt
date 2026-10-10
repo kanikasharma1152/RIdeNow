@@ -1,0 +1,62 @@
+# ── RideNow Backend Dependencies ─────────────────────────────────────────────
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Core Web & ASGI Framework
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn[standard]==0.52.4
+gunicorn>=21.2.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+pydantic[email]>=2.0.0
+email-validator>=2.0.0
+python-multipart==0.0.32
+websockets==15.0.1
+
+# Database & ORM
+SQLAlchemy==2.0.52
+asyncpg==0.31.0
+alembic==1.19.1
+
+# Security & Authentication
+pwdlib[argon2]==0.3.1
+passlib[bcrypt]==1.7.4
+bcrypt==5.0.0
+argon2-cffi==25.1.0
+python-jose[cryptography]==3.5.0
+PyJWT==2.14.0
+
+# HTTP & Utilities
+httpx==0.28.1
+requests==2.34.2
+python-dotenv==1.2.3
+
+# Redis Cache & Messaging
+redis==8.1.0
+
+# AI / LLM Providers
+groq==1.7.0
+openai==2.54.0
+
+# ChromaDB & RAG Embeddings
+chromadb==1.5.9
+sentence-transformers==6.0.1
+torch>=2.0.0
+
+# LiveKit & Cartesia Voice (Phase 5)
+livekit==1.1.18
+livekit-api==1.2.1
+livekit-agents==1.8.1
+livekit-plugins-cartesia==1.8.1
+livekit-plugins-groq==1.8.1
+livekit-plugins-silero==1.8.1
+
+# Machine Learning & Analytics
+scikit-learn==1.9.1
+numpy==2.4.6
+scipy==1.17.1
+
+# Testing
+pytest==9.1.1
+pytest-asyncio==1.4.0
+aiosqlite==0.22.1

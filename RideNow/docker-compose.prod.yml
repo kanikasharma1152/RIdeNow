@@ -1,0 +1,257 @@
+
+# =============================================================================
+# RideNow — Production Orchestration
+# =============================================================================
+# Target: Oracle Cloud Infrastructure Always Free ARM VM
+#         (VM.Standard.A1.Flex — linux/arm64 — 2 OCPU / 12 GB RAM)
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod ps
+#
+# First-run migration (run once after first `up -d`):
+#   docker exec ridenow_backend alembic upgrade head
+#
+# NEVER commit .env.prod to git.
+# =============================================================================
+
+services:
+
+  # ── PostgreSQL 16 ─────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    # alpine images are multi-arch: linux/amd64 + linux/arm64 ✅
+    container_name: ridenow_db
+    restart: unless-stopped
+    networks:
+      - ridenow_internal
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # Do NOT expose 5432 to host in production — internal network only
+    volumes:
+      - ridenow_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Redis 7 ───────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    # alpine images are multi-arch: linux/amd64 + linux/arm64 ✅
+    container_name: ridenow_redis
+    restart: unless-stopped
+    networks:
+      - ridenow_internal
+    # AOF persistence: ensures AI chat history / rate-limit state survive restarts.
+    # appendonly yes writes every command to disk; fsync everysec is safe + performant.
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+    # Do NOT expose 6379 to host — internal network only
+    volumes:
+      - ridenow_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/arm64}
+    container_name: ridenow_backend
+    restart: unless-stopped
+    networks:
+      - ridenow_internal
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # ── Deployment mode ─────────────────────────────────────────────────
+      ENVIRONMENT: production
+
+      # ── Database ────────────────────────────────────────────────────────
+      # Full asyncpg URL; db hostname resolves via Docker internal network.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+      DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-1800}
+
+      # ── JWT Auth ─────────────────────────────────────────────────────────
+      SECRET_KEY: ${SECRET_KEY}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+
+      # ── CORS ─────────────────────────────────────────────────────────────
+      # Must be the exact production frontend URL (e.g. https://ridenow.vercel.app).
+      # No wildcards when allow_credentials=True.
+      CORS_ORIGINS: ${CORS_ORIGINS}
+
+      # ── Redis ─────────────────────────────────────────────────────────────
+      # redis hostname resolves via Docker internal network.
+      REDIS_URL: redis://redis:6379/0
+      REDIS_CHAT_TTL_SECONDS: ${REDIS_CHAT_TTL_SECONDS:-3600}
+      REDIS_RATE_LIMIT_REQUESTS: ${REDIS_RATE_LIMIT_REQUESTS:-30}
+      REDIS_RATE_LIMIT_WINDOW_SECONDS: ${REDIS_RATE_LIMIT_WINDOW_SECONDS:-60}
+
+      # ── LLM (Groq) ────────────────────────────────────────────────────────
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_TIMEOUT_SECONDS: ${GROQ_TIMEOUT_SECONDS:-30}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-1024}
+
+      # ── LiveKit ───────────────────────────────────────────────────────────
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_TOKEN_TTL_MINUTES: ${LIVEKIT_TOKEN_TTL_MINUTES:-60}
+
+      # ── Cartesia ──────────────────────────────────────────────────────────
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY}
+      CARTESIA_VOICE_ID: ${CARTESIA_VOICE_ID:-f786b574-daa5-4673-aa0c-cbe3e8534c02}
+      CARTESIA_MODEL: ${CARTESIA_MODEL:-sonic-3}
+      CARTESIA_STT_MODEL: ${CARTESIA_STT_MODEL:-ink-whisper}
+
+      # ── ChromaDB (embedded — runs inside this container) ──────────────────
+      # Points to the named Docker volume mounted at /app/chroma_db below.
+      CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-ridenow_knowledge}
+      CHROMA_PERSIST_DIR: /app/chroma_db
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      RAG_TOP_K: ${RAG_TOP_K:-4}
+
+      # ── Feature flags ─────────────────────────────────────────────────────
+      AI_CHAT_ENABLED: ${AI_CHAT_ENABLED:-true}
+      WEBSOCKET_ENABLED: ${WEBSOCKET_ENABLED:-true}
+      RAG_ENABLED: ${RAG_ENABLED:-true}
+
+      # ── Gunicorn workers ─────────────────────────────────────────────────
+      # For a 2 OCPU ARM VM: 2 workers × 1 OCPU each is efficient.
+      # Each uvicorn.workers.UvicornWorker runs a full asyncio event loop.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-warning}
+      PORT: 8000
+
+    # ChromaDB lives on a named persistent volume mounted inside /app/chroma_db.
+    # This matches CHROMA_PERSIST_DIR above and preserves the RAG database
+    # across container recreation without changing any application code.
+    volumes:
+      - ridenow_chroma_data:/app/chroma_db
+
+    # Only expose to internal network; reverse proxy (Caddy/nginx) forwards
+    # external traffic to this port.
+    expose:
+      - "8000"
+
+    # Production command: gunicorn + uvicorn ASGI workers (already in Dockerfile CMD).
+    # No --reload. No create_tables.py (tables are managed by Alembic migrations).
+    # Run `docker exec ridenow_backend alembic upgrade head` once after first start.
+    command: ["gunicorn", "-c", "gunicorn_conf.py", "app.main:app"]
+
+    healthcheck:
+      # /health/live is a pure liveness check — no DB I/O, instant response.
+      # Using /health/live (not /health/ready) so the container stays "healthy"
+      # even during transient DB blips; readiness is Alembic's concern at startup.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── LiveKit Voice Worker ───────────────────────────────────────────────────
+  voice_agent:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/arm64}
+    container_name: ridenow_voice_agent
+    restart: unless-stopped
+    networks:
+      - ridenow_internal
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      # The voice agent is a LiveKit worker daemon — it dials OUT to LiveKit Cloud.
+      # It needs the DB (for user lookup / ride queries) and Redis (for AI memory).
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY}
+      CARTESIA_VOICE_ID: ${CARTESIA_VOICE_ID:-f786b574-daa5-4673-aa0c-cbe3e8534c02}
+      CARTESIA_MODEL: ${CARTESIA_MODEL:-sonic-3}
+      CARTESIA_STT_MODEL: ${CARTESIA_STT_MODEL:-ink-whisper}
+      # ChromaDB path must match the volume mount for shared RAG access
+      CHROMA_PERSIST_DIR: /app/chroma_db
+      CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-ridenow_knowledge}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+
+    # Share the same ChromaDB volume as the backend for consistent RAG access.
+    volumes:
+      - ridenow_chroma_data:/app/chroma_db
+
+    # This is a LiveKit worker daemon. It has NO HTTP server.
+    # The healthcheck verifies:
+    #   1. PID 1 is the livekit_agent process (process is alive)
+    #   2. LiveKit Cloud is reachable on TCP:443 (agent can communicate)
+    # This is the same healthcheck that was verified HEALTHY in Phase 16 audit.
+    command: ["python", "-m", "app.ai.livekit_agent", "start"]
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - |
+          import socket, urllib.parse, os
+          assert 'livekit_agent' in open('/proc/1/cmdline', 'rb').read().decode('latin1', 'ignore')
+          u = urllib.parse.urlparse(os.environ.get('LIVEKIT_URL', ''))
+          s = socket.create_connection((u.hostname, 443), timeout=5)
+          s.close()
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# ── Internal Network ──────────────────────────────────────────────────────────
+# All services communicate over this bridge network.
+# Nothing in this network is exposed to the host unless explicitly published.
+networks:
+  ridenow_internal:
+    driver: bridge
+    name: ridenow_internal
+
+# ── Named Persistent Volumes ──────────────────────────────────────────────────
+# All stateful data persists in named volumes managed by Docker.
+# These survive `docker compose down` (but NOT `docker compose down -v`).
+# On OCI, these live on the 200 GB block volume attached to the VM.
+volumes:
+  ridenow_pgdata:
+    name: ridenow_pgdata
+  ridenow_redis_data:
+    name: ridenow_redis_data
+  ridenow_chroma_data:
+    name: ridenow_chroma_data

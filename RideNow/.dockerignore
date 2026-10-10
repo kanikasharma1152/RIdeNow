@@ -1,0 +1,50 @@
+# ── Virtual Environments ───────────────────────────────────────────────────────
+venv/
+.venv/
+backend/venv/
+backend/.venv/
+
+# ── Frontend Dependencies & Build Outputs ─────────────────────────────────────
+frontend/node_modules/
+node_modules/
+frontend/dist/
+dist/
+frontend_CodexBackup/
+
+# ── Python Cache & Bytecode ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ── Testing & Coverage Artifacts ──────────────────────────────────────────────
+.pytest_cache/
+backend/.pytest_cache/
+.coverage
+htmlcov/
+
+# ── Version Control & IDE ─────────────────────────────────────────────────────
+.git/
+.gitignore
+.idea/
+.vscode/
+.cursor/
+
+# ── Environment & Local Secrets ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+
+# ── Logs & Temporary Files ────────────────────────────────────────────────────
+*.log
+logs/
+scratch/
+.DS_Store
+Thumbs.db
+
+# ── Build & Packaging ─────────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
