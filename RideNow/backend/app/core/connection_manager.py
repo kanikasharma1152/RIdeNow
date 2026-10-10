@@ -82,10 +82,12 @@ class ConnectionManager:
             self.disconnect(ws, user_id)
 
     async def broadcast_to_role(self, role: str, message: Dict[str, Any]):
-        """Broadcast a message to all connected users with a given role."""
+        """Broadcast a message concurrently to all connected users with a given role."""
         target_user_ids = [uid for uid, r in self.user_roles.items() if r == role]
-        for uid in target_user_ids:
-            await self.send_personal_message(uid, message)
+        if target_user_ids:
+            tasks = [self.send_personal_message(uid, message) for uid in target_user_ids]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
 
     async def send_ride_event(
         self,
@@ -114,6 +116,18 @@ class ConnectionManager:
 
     def is_user_connected(self, user_id: int) -> bool:
         return user_id in self.active_connections and len(self.active_connections[user_id]) > 0
+
+    def get_connection_stats(self) -> Dict[str, Any]:
+        """Return total active sockets and connected users by role."""
+        total_sockets = sum(len(s) for s in self.active_connections.values())
+        role_counts: Dict[str, int] = {}
+        for role in self.user_roles.values():
+            role_counts[role] = role_counts.get(role, 0) + 1
+        return {
+            "total_sockets": total_sockets,
+            "connected_users": len(self.active_connections),
+            "users_by_role": role_counts,
+        }
 
 
 # Global singleton instance

@@ -41,12 +41,33 @@ async def get_driver_copilot_briefing(user: User, db: AsyncSession) -> Dict[str,
         except Exception as exc:
             logger.warning(f"Driver earnings lookup for driver {driver.id}: {exc}")
 
-    # Dynamic demand hotspots based on typical city traffic patterns
-    demand_zones = [
-        {"zone": "Downtown / Tech Park", "surge_factor": "1.4x", "demand_level": "High", "eta_mins": 10},
-        {"zone": "Central Railway Station", "surge_factor": "1.2x", "demand_level": "Moderate", "eta_mins": 15},
-        {"zone": "International Airport", "surge_factor": "1.5x", "demand_level": "High", "eta_mins": 25},
-    ]
+    # Dynamic demand hotspots from Phase 3 ML demand predictor
+    demand_zones = []
+    try:
+        from app.ml.demand.predictor import get_demand_hotspots
+        ml_hotspots = await get_demand_hotspots(db, limit=3)
+        for h in ml_hotspots:
+            lat = h["zone"]["lat"]
+            lon = h["zone"]["lon"]
+            score = h.get("current_demand_score", 1.0)
+            level = h.get("demand_level", "Medium").title()
+            surge = f"{max(1.0, round(score, 1))}x"
+            demand_zones.append({
+                "zone": f"Zone ({lat:.2f}, {lon:.2f})",
+                "surge_factor": surge,
+                "demand_level": level,
+                "eta_mins": 10,
+                "historical_rides_7d": h.get("historical_rides_7d", 0),
+            })
+    except Exception as exc:
+        logger.debug(f"Could not load ML hotspots for driver copilot: {exc}")
+
+    if not demand_zones:
+        demand_zones = [
+            {"zone": "Downtown / Tech Park", "surge_factor": "1.4x", "demand_level": "High", "eta_mins": 10},
+            {"zone": "Central Railway Station", "surge_factor": "1.2x", "demand_level": "Moderate", "eta_mins": 15},
+            {"zone": "International Airport", "surge_factor": "1.5x", "demand_level": "High", "eta_mins": 25},
+        ]
 
     tips = [
         "Peak morning rush begins in ~30 minutes around commercial hubs.",

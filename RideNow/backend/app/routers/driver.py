@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from typing import Optional
 
@@ -25,7 +26,7 @@ from app.services.driver import (
 )
 
 from app.services.ride import get_driver_earnings
-
+from app.core.connection_manager import ws_manager
 from app.routers.user import get_current_user, require_role
 from app.core.exceptions import RideNowError, DuplicateResourceError
 
@@ -34,6 +35,7 @@ router = APIRouter(
     prefix="/drivers",
     tags=["Drivers"],
 )
+
 
 
 def _handle_ridenow_error(e: RideNowError):
@@ -254,6 +256,20 @@ async def update_driver_location_api(
             latitude=location_data.latitude,
             longitude=location_data.longitude,
         )
+
+        # Broadcast real-time location to admin subscribers and any passenger
+        # watching this driver via WebSocket — fire-and-forget, non-blocking
+        location_event = {
+            "type": "driver_location",
+            "data": {
+                "driver_id": driver.id,
+                "user_id": current_user.id,
+                "latitude": driver.latitude,
+                "longitude": driver.longitude,
+            },
+        }
+        asyncio.ensure_future(ws_manager.broadcast_to_role("admin", location_event))
+
 
         return {
             "driver_id": driver.id,

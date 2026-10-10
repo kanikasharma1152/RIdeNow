@@ -13,24 +13,56 @@ from app.repositories.analytics import (
     get_overview_metrics,
     get_recent_rides_trend,
     get_top_pickup_hotspots,
+    get_admin_fleet_drivers,
 )
 from app.ai.llm import get_llm_provider
+from app.core.redis import cache_get, cache_set, cache_delete
 
 logger = logging.getLogger(__name__)
 
+ADMIN_ANALYTICS_CACHE_KEY = "admin:dashboard_analytics"
+ADMIN_ANALYTICS_CACHE_TTL = 60  # seconds
 
-async def get_dashboard_analytics(db: AsyncSession) -> Dict[str, Any]:
-    """Compile comprehensive analytics dashboard payload."""
+
+async def get_dashboard_analytics(db: AsyncSession, use_cache: bool = True) -> Dict[str, Any]:
+    """Compile comprehensive analytics dashboard payload with 60s Redis caching."""
+    if use_cache:
+        try:
+            cached = await cache_get(ADMIN_ANALYTICS_CACHE_KEY)
+            if cached and isinstance(cached, dict):
+                return cached
+        except Exception as exc:
+            logger.warning(f"Cache read error for admin analytics: {exc}")
+
     overview = await get_overview_metrics(db)
     trend = await get_recent_rides_trend(db, days=7)
     hotspots = await get_top_pickup_hotspots(db, limit=5)
+    fleet = await get_admin_fleet_drivers(db, limit=20)
 
-    return {
+    payload = {
         "success": True,
         "overview": overview,
         "trend_7d": trend,
         "top_hotspots": hotspots,
+        "fleet_drivers": fleet,
     }
+
+    if use_cache:
+        try:
+            await cache_set(ADMIN_ANALYTICS_CACHE_KEY, payload, ttl=ADMIN_ANALYTICS_CACHE_TTL)
+        except Exception as exc:
+            logger.warning(f"Cache write error for admin analytics: {exc}")
+
+    return payload
+
+
+async def invalidate_admin_analytics_cache() -> None:
+    """Explicitly invalidate the admin analytics cache when rides or drivers change."""
+    try:
+        await cache_delete(ADMIN_ANALYTICS_CACHE_KEY)
+    except Exception as exc:
+        logger.warning(f"Cache invalidation error for admin analytics: {exc}")
+
 
 
 async def generate_ai_insights(db: AsyncSession) -> Dict[str, Any]:

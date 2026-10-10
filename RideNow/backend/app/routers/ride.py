@@ -21,7 +21,11 @@ from app.services.ride import (
     reject_ride,
     get_passenger_rides_paginated,
     get_driver_rides_paginated,
+    calculate_fare,
+    enrich_ride_with_driver_info,
 )
+
+from app.services.google_map import geocode_address, calculate_route_distance
 
 from app.routers.user import (
     get_current_user,
@@ -52,6 +56,50 @@ def _handle_ridenow_error(e: RideNowError):
         status_code=e.status_code,
         detail=e.message,
     )
+
+
+# =========================
+# Fare Estimate (no auth required)
+# =========================
+
+@router.get(
+    "/fare-estimate",
+    summary="Estimate fare before booking",
+    description="Geocodes pickup and dropoff, calculates distance, and returns fare estimate. No ride is created.",
+)
+async def fare_estimate_api(
+    pickup_location: str = Query(..., description="Pickup address"),
+    dropoff_location: str = Query(..., description="Dropoff address"),
+):
+    try:
+        pickup_coords = await geocode_address(pickup_location)
+        dropoff_coords = await geocode_address(dropoff_location)
+
+        distance_km = await calculate_route_distance(
+            pickup_coords["latitude"], pickup_coords["longitude"],
+            dropoff_coords["latitude"], dropoff_coords["longitude"],
+        )
+
+        estimated_fare = calculate_fare(distance_km)
+
+        return {
+            "pickup_location": pickup_location,
+            "dropoff_location": dropoff_location,
+            "pickup_latitude": pickup_coords["latitude"],
+            "pickup_longitude": pickup_coords["longitude"],
+            "dropoff_latitude": dropoff_coords["latitude"],
+            "dropoff_longitude": dropoff_coords["longitude"],
+            "distance_km": round(distance_km, 2),
+            "estimated_fare": float(estimated_fare),
+            "base_fare": 50.0,
+            "per_km_rate": 12.0,
+            "currency": "INR",
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Location service unavailable: {e}")
+
 
 
 # =========================
@@ -465,11 +513,14 @@ async def get_ride_api(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        return await get_ride(
+        ride = await get_ride(
             db=db,
             ride_id=ride_id,
             user_id=current_user.id,
         )
+        # Attach driver info for frontend display
+        ride = await enrich_ride_with_driver_info(db, ride)
+        return ride
     except RideNotFoundError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

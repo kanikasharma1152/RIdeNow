@@ -10,7 +10,7 @@ State machine:
 """
 
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 from math import radians, sin, cos, sqrt, atan2
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +51,7 @@ from app.repositories.ride import (
     update_ride_status,
     cancel_ride,
     get_driver_earnings_stats,
+    get_active_ride_for_passenger,
 )
 
 from app.repositories.rejection import (
@@ -65,6 +66,7 @@ from app.repositories.driver import (
     get_available_drivers,
     update_driver_availability,
 )
+from app.services.driver import get_or_create_driver
 
 from app.services.google_map import (
     geocode_address,
@@ -98,9 +100,10 @@ def calculate_fare(distance_km: float | Decimal) -> Decimal:
 # ─── State Machine ────────────────────────────────────────────────────────────
 
 VALID_TRANSITIONS: dict[str, list[str]] = {
-    "REQUESTED": ["ACCEPTED"],
+    "REQUESTED": ["ACCEPTED", "CANCELLED"],
     "ACCEPTED": ["STARTED", "REQUESTED", "CANCELLED"],
     "STARTED": ["COMPLETED"],
+
     "COMPLETED": [],
     "CANCELLED": [],
 }
@@ -136,14 +139,17 @@ async def find_next_available_driver(
     extra_excluded_driver_ids: list[int] | None = None,
 ):
     """
-    Find the nearest available and eligible driver for a ride.
+    Find the best available and eligible driver for a ride.
+    Uses multi-signal ML scoring (distance 40%, ETA 30%, rating 20%, acceptance 10%).
+    Falls back to nearest-driver if ML engine errors.
+
     Considers:
       - Driver is online and available (is_online=True, is_available=True)
       - Driver has valid latitude and longitude coordinates
       - Excludes any driver who has rejected this ride
       - Excludes any extra driver IDs passed (e.g. current rejecting driver)
     Returns:
-      Nearest Driver or None if no eligible driver is found.
+      Best-matched Driver or None if no eligible driver is found.
     """
     if ride.pickup_latitude is None or ride.pickup_longitude is None:
         return None
@@ -154,6 +160,22 @@ async def find_next_available_driver(
 
     drivers = await get_available_drivers(db)
 
+    # ── Multi-signal ML matching ───────────────────────────────────────────
+    try:
+        from app.ml.matching.engine import find_best_driver
+        best = await find_best_driver(
+            drivers=drivers,
+            pickup_lat=ride.pickup_latitude,
+            pickup_lon=ride.pickup_longitude,
+            excluded_ids=excluded_ids,
+            db=db,
+        )
+        if best is not None:
+            return best
+    except Exception:
+        pass  # Fall through to simple nearest-driver fallback
+
+    # ── Fallback: simple nearest driver ───────────────────────────────────
     eligible = [
         d for d in drivers
         if d.id not in excluded_ids
@@ -173,6 +195,7 @@ async def find_next_available_driver(
             d.latitude, d.longitude,
         ),
     )
+
 
 
 async def _assign_and_notify_driver(
@@ -271,6 +294,13 @@ async def request_ride(
     if pickup_location.strip().lower() == dropoff_location.strip().lower():
         raise ValueError("Pickup and dropoff locations cannot be the same")
 
+    # Prevent double-booking: check for an existing active ride for this passenger
+    existing_active = await get_active_ride_for_passenger(db, passenger_id)
+    if existing_active:
+        raise DuplicateResourceError(
+            f"You already have an active ride (#{existing_active.id}) in progress"
+        )
+
     if pickup_latitude is None or pickup_longitude is None:
         pickup_coords = await geocode_address(pickup_location)
         pickup_latitude = pickup_coords["latitude"]
@@ -338,6 +368,40 @@ async def get_ride(
     raise UnauthorizedRideAccessError()
 
 
+async def enrich_ride_with_driver_info(db: AsyncSession, ride):
+    """
+    Attach driver_info dict to ride object so it serialises into RideResponse.
+    This avoids ORM relationship loading complexity.
+    """
+    if ride.driver_id is None:
+        return ride
+
+    driver = await get_driver_by_id(db, ride.driver_id)
+    if driver:
+        now = datetime.now(timezone.utc)
+        location_age_seconds = None
+        is_stale = False
+        if driver.location_updated_at:
+            dt = driver.location_updated_at
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            location_age_seconds = round((now - dt).total_seconds(), 1)
+            is_stale = location_age_seconds > 120.0  # 2 minutes threshold
+
+        ride.driver_info = {
+            "id": driver.id,
+            "vehicle_model": driver.vehicle_model or "Unknown",
+            "vehicle_number": driver.vehicle_number or "Unknown",
+            "vehicle_type": driver.vehicle_type or "sedan",
+            "latitude": driver.latitude,
+            "longitude": driver.longitude,
+            "location_updated_at": driver.location_updated_at.isoformat() if driver.location_updated_at else None,
+            "location_age_seconds": location_age_seconds,
+            "is_location_stale": is_stale,
+        }
+    return ride
+
+
 # ─── Passenger: Ride History (legacy + paginated) ─────────────────────────────
 
 async def get_passenger_rides(
@@ -386,9 +450,7 @@ async def get_driver_rides(
     db: AsyncSession,
     user_id: int,
 ):
-    driver = await get_driver_by_user_id(db, user_id)
-    if not driver:
-        raise DriverNotFoundError()
+    driver = await get_or_create_driver(db, user_id)
     return await get_rides_by_driver(db=db, driver_id=driver.id)
 
 
@@ -402,9 +464,7 @@ async def get_driver_rides_paginated(
     end_date: datetime | None = None,
     sort: str = "newest",
 ):
-    driver = await get_driver_by_user_id(db, user_id)
-    if not driver:
-        raise DriverNotFoundError()
+    driver = await get_or_create_driver(db, user_id)
 
     page_size = _clamp_page_size(page_size)
     page = max(page, 1)
@@ -435,13 +495,9 @@ async def get_available_rides(
     db: AsyncSession,
     user_id: int,
 ):
-    driver = await get_driver_by_user_id(db, user_id)
-    if not driver:
-        raise DriverNotFoundError()
-    if not driver.is_online:
-        raise DriverUnavailableError("Driver is offline")
-    if not driver.is_available:
-        raise DriverUnavailableError("Driver is not available")
+    driver = await get_or_create_driver(db, user_id)
+    if not driver.is_online or not driver.is_available:
+        return []
 
     return await get_requested_rides(db)
 
@@ -751,9 +807,7 @@ async def get_driver_earnings(
     start_date: datetime | None = None,
     end_date: datetime | None = None,
 ):
-    driver = await get_driver_by_user_id(db, user_id)
-    if not driver:
-        raise DriverNotFoundError()
+    driver = await get_or_create_driver(db, user_id)
 
     return await get_driver_earnings_stats(
         db=db,

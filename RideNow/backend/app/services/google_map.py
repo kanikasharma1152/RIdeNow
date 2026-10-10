@@ -33,16 +33,26 @@ async def geocode_address(address: str):
         "User-Agent": "RideNow/1.0"
     }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=10.0,
-        )
+    from app.core.retry import with_retry
 
-    response.raise_for_status()
-    data = response.json()
+    async def _fetch():
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=8.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    data = await with_retry(
+        _fetch,
+        max_attempts=3,
+        base_delay=0.5,
+        max_delay=3.0,
+        operation_name="nominatim_geocode",
+    )
 
     if not data:
         raise ValueError(f"Unable to find location: {address}")
@@ -85,15 +95,25 @@ async def calculate_route_distance(
     )
     params = {"overview": "false"}
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            url,
-            params=params,
-            timeout=10.0,
-        )
+    from app.core.retry import with_retry
 
-    response.raise_for_status()
-    data = response.json()
+    async def _fetch_route():
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                url,
+                params=params,
+                timeout=8.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    data = await with_retry(
+        _fetch_route,
+        max_attempts=3,
+        base_delay=0.5,
+        max_delay=3.0,
+        operation_name="osrm_route",
+    )
 
     if data.get("code") != "Ok" or not data.get("routes"):
         raise ValueError("Unable to calculate route")
@@ -107,4 +127,4 @@ async def calculate_route_distance(
     except Exception as exc:
         logger.debug(f"Redis cache write failed: {exc}")
 
-    return dist_km
+    return dist_km

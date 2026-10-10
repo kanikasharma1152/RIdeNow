@@ -6,24 +6,26 @@ Endpoint: /ws?token=<jwt_token>
 Authenticates the client using JWT token via query parameter.
 Maintains continuous bi-directional connection for:
 - Real-time ride assignment and status transitions
-- Live driver GPS tracking
+- Live driver GPS tracking (persisted to DB + broadcast to passenger)
 - Instant cancellation notifications
 - Ping/pong heartbeat keepalive
 """
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.core.security import decode_access_token
 from app.core.connection_manager import ws_manager
 from app.repositories.user import get_user_by_id
 from app.repositories.revoked_token import is_token_revoked
-from app.repositories.driver import get_driver_by_user_id
+from app.repositories.driver import get_driver_by_user_id, update_driver_location
+from app.models.ride import Ride
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +75,7 @@ async def websocket_endpoint(
 
         user_role = user.role
 
-        # If driver, register driver_id mapping
+        # If driver, register driver_id mapping for WS manager routing
         if user_role == "driver":
             driver = await get_driver_by_user_id(db, user.id)
             if driver:
@@ -110,11 +112,47 @@ async def websocket_endpoint(
                 await websocket.send_json({"type": "PONG", "timestamp": data.get("timestamp")})
 
             elif msg_type == "DRIVER_LOCATION":
-                # Can optionally update driver location in DB/memory
                 lat = data.get("latitude")
                 lon = data.get("longitude")
                 if lat is not None and lon is not None and user_role == "driver":
-                    logger.debug(f"[WS] Driver {user_id} location update: {lat}, {lon}")
+                    try:
+                        async with AsyncSessionLocal() as db:
+                            # 1. Persist location to DB
+                            driver = await get_driver_by_user_id(db, user_id)
+                            if driver:
+                                await update_driver_location(db, driver, lat, lon)
+                                # update_driver_location already commits
+
+                                # 2. Find passengers with active rides assigned to this driver
+                                result = await db.execute(
+                                    select(Ride).where(
+                                        Ride.driver_id == driver.id,
+                                        Ride.status.in_(["ACCEPTED", "STARTED"]),
+                                    )
+                                )
+                                active_rides = result.scalars().all()
+
+                                # 3. Broadcast location update to each passenger
+                                now_iso = datetime.now(timezone.utc).isoformat()
+                                for ride in active_rides:
+                                    await ws_manager.send_personal_message(
+                                        ride.passenger_id,
+                                        {
+                                            "type": "DRIVER_LOCATION_UPDATE",
+                                            "driver_id": driver.id,
+                                            "latitude": lat,
+                                            "longitude": lon,
+                                            "timestamp": now_iso,
+                                            "ride_id": ride.id,
+                                        },
+                                    )
+
+                                logger.debug(
+                                    f"[WS] Driver {user_id} location persisted ({lat}, {lon}); "
+                                    f"notified {len(active_rides)} passenger(s)"
+                                )
+                    except Exception as exc:
+                        logger.error(f"[WS] Failed to process DRIVER_LOCATION for user {user_id}: {exc}")
 
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket, user_id)
