@@ -17,10 +17,15 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
+    // Extract request-id from response header if available
+    const requestId = error.response?.headers?.['x-request-id'] || error.response?.data?.error?.request_id;
+    if (requestId) {
+      error.requestId = requestId;
+    }
+
     // Handle 401 Unauthorized globally
     if (error.response && error.response.status === 401) {
       localStorage.removeItem('token');
-      // Using window.location to avoid circular dependencies with React Router
       if (window.location.pathname !== '/login' && window.location.pathname !== '/register') {
         window.location.href = '/login';
       }
@@ -30,18 +35,36 @@ api.interceptors.response.use(
 );
 
 export const getErrorMessage = (error, defaultMsg = 'Something went wrong') => {
+  if (!error?.response) {
+    return 'Connection lost. Please check your network and try again.';
+  }
+
+  const status = error.response.status;
+  const requestId = error.requestId || error.response?.headers?.['x-request-id'];
+  const reqSuffix = requestId ? ` (Ref: ${requestId})` : '';
+
+  if (status === 429) {
+    return 'Too many requests. Please wait a moment and try again.';
+  }
+  if (status === 503) {
+    return `RideNow service is temporarily unavailable. Please try again in a few moments.${reqSuffix}`;
+  }
+  if (status >= 500) {
+    return `A server error occurred. Please try again.${reqSuffix}`;
+  }
+
   if (error?.response?.data?.error?.message) {
-    return error.response.data.error.message;
+    return `${error.response.data.error.message}${reqSuffix}`;
   }
   if (typeof error?.response?.data?.detail === 'string') {
-    return error.response.data.detail;
+    return `${error.response.data.detail}${reqSuffix}`;
   }
   if (Array.isArray(error?.response?.data?.detail) && error.response.data.detail.length > 0) {
     const firstErr = error.response.data.detail[0];
     const field = firstErr.loc?.slice(-1)[0];
-    return `${field ? field + ': ' : ''}${firstErr.msg}`;
+    return `${field ? field + ': ' : ''}${firstErr.msg}${reqSuffix}`;
   }
-  return error?.message || defaultMsg;
+  return `${error?.message || defaultMsg}${reqSuffix}`;
 };
 
 export default api;

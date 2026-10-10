@@ -15,8 +15,10 @@ import {
   Sparkles,
   Compass,
   BarChart3,
-  Bot
+  Bot,
+  Shield
 } from 'lucide-react';
+
 import toast from 'react-hot-toast';
 import notificationService from '../services/notificationService';
 import ChatWidget from '../components/ChatWidget';
@@ -80,10 +82,12 @@ const DashboardLayout = () => {
       { name: 'AI Assistant', path: '/assistant', icon: Sparkles },
       { name: 'Book Ride', path: '/book-ride', icon: MapPin },
       { name: 'My Rides', path: '/rides', icon: Clock },
+      { name: 'Safety Guard', path: '/safety', icon: Shield },
       { name: 'Payments', path: '/payments', icon: CreditCard },
       { name: 'Notifications', path: '/notifications', icon: Bell, badge: unreadCount },
       { name: 'Profile', path: '/profile', icon: User },
     ];
+
   }
 
   // Helper to get current page title based on path

@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { sendChatMessage, clearChatHistory } from '../services/chatService';
 import VoiceAssistant from './ai/VoiceAssistant';
@@ -15,6 +16,8 @@ import {
   CheckCircle,
   Clock,
   Compass,
+  Car,
+  ArrowRight,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -68,11 +71,16 @@ export default function ChatWidget() {
 
     try {
       const response = await sendChatMessage(query.trim());
+
+      const bookTool = (response.tools_executed || []).find((t) => t.tool === 'book_ride');
+      const bookingResult = bookTool?.result?.success ? bookTool.result : null;
+
       const botMessage = {
         id: String(Date.now() + 1),
         role: 'assistant',
         content: response.reply,
         tools: response.tools_executed || [],
+        bookingResult: bookingResult,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
 
@@ -134,7 +142,7 @@ export default function ChatWidget() {
                     ONLINE
                   </span>
                 </div>
-                <p className="text-[11px] text-gray-400 mt-0.5 font-mono">GROQ LLM · INTELLIGENT CORE</p>
+                <p className="text-[11px] text-gray-400 mt-0.5 font-mono">INTELLIGENT CORE</p>
               </div>
             </div>
 
@@ -197,6 +205,33 @@ export default function ChatWidget() {
                       }`}
                     >
                       <div className="whitespace-pre-wrap font-normal">{m.content}</div>
+
+                      {/* Booking Confirmation Card */}
+                      {m.bookingResult && (
+                        <div className="mt-2.5 p-3 rounded-xl bg-[#0A0F14] border border-[#38BDF8]/40 shadow-md text-[#F5F7FA]">
+                          <div className="flex items-center justify-between mb-1.5 border-b border-[#1E293B] pb-1">
+                            <span className="text-[11px] font-bold text-[#38BDF8] flex items-center gap-1">
+                              <Car size={13} /> RIDE BOOKED #{m.bookingResult.ride_id}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-[#38BDF8] text-[#05070A]">
+                              {m.bookingResult.status}
+                            </span>
+                          </div>
+                          <div className="space-y-1 text-[11px] text-gray-300">
+                            <div><span className="text-gray-500">Pickup:</span> {m.bookingResult.pickup}</div>
+                            <div><span className="text-gray-500">Destination:</span> {m.bookingResult.dropoff}</div>
+                            <div><span className="text-gray-500">Fare:</span> <span className="font-mono font-bold text-emerald-400">₹{m.bookingResult.fare}</span></div>
+                          </div>
+                          <Link
+                            to={`/rides/${m.bookingResult.ride_id}`}
+                            onClick={() => setIsOpen(false)}
+                            className="mt-2.5 w-full btn btn-primary py-1.5 text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1"
+                          >
+                            <span>Track Live Ride</span>
+                            <ArrowRight size={12} />
+                          </Link>
+                        </div>
+                      )}
 
                       <span
                         className={`block text-[10px] mt-1 font-mono ${

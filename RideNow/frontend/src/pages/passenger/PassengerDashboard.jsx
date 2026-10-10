@@ -1,4 +1,20 @@
-import { useState, useEffect } from 'react';
+/**
+ * RideNow — AI-First Passenger Home Screen
+ * ==========================================
+ * The primary interaction paradigm: "Where do you want to go?"
+ *
+ * Layout:
+ *   - Time-aware greeting
+ *   - AI Command Bar (text + voice + camera)
+ *   - Active ride card (pinned when riding)
+ *   - Live map (full width, real data)
+ *   - Smart destination suggestions
+ *   - Recent journeys
+ *
+ * All data comes from real API. No fake/mock data.
+ */
+
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useSocket } from '../../context/WebSocketContext';
@@ -9,80 +25,218 @@ import {
   Navigation,
   Clock,
   ChevronRight,
-  Search,
   Sparkles,
   Car,
-  ShieldCheck,
-  Zap,
   ArrowRight,
-  Activity,
-  Bot
+  Mic,
+  Camera,
+  Send,
+  Loader2,
+  Bot,
+  Star,
+  ShieldCheck,
+  CreditCard,
+  X,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import toast from 'react-hot-toast';
+import { analyzeLocationImage } from '../../services/visionService';
+import { mobilityService } from '../../services/mobilityService';
 
-const PassengerDashboard = () => {
+// Greeting based on local time
+function getGreeting() {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  if (h < 21) return 'Good evening';
+  return 'Good night';
+}
+
+// Smart destination chips — shown from recent rides
+function buildSuggestions(recentRides) {
+  const seen = new Set();
+  const chips = [];
+  for (const ride of recentRides) {
+    const loc = ride.dropoff_location;
+    if (loc && !seen.has(loc)) {
+      seen.add(loc);
+      chips.push(loc);
+    }
+    if (chips.length >= 3) break;
+  }
+  return chips;
+}
+
+export default function PassengerDashboard() {
   const { user } = useAuth();
   const { subscribe } = useSocket();
   const navigate = useNavigate();
-  
-  const [recentRides, setRecentRides] = useState([]);
-  const [activeRide, setActiveRide] = useState(null);
-  const [loading, setLoading] = useState(true);
-  
-  const [pickup, setPickup] = useState('');
-  const [dropoff, setDropoff] = useState('');
 
-  const fetchDashboardData = async () => {
+  const [recentRides, setRecentRides]   = useState([]);
+  const [activeRide, setActiveRide]     = useState(null);
+  const [mobilitySummary, setMobilitySummary] = useState(null);
+  const [loading, setLoading]           = useState(true);
+  const [userLocation, setUserLocation] = useState(null);
+
+  // AI Command Bar state
+  const [query, setQuery]         = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const inputRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  // ── Data fetching ──────────────────────────────────────────────────────
+  const fetchData = useCallback(async () => {
     try {
-      const response = await getPassengerRides(); 
+      const response = await getPassengerRides();
       const rides = Array.isArray(response) ? response : (response.items || []);
-      
-      // Look for active trip in REQUESTED, ACCEPTED, or STARTED state
-      const active = rides.find((r) => ['REQUESTED', 'ACCEPTED', 'STARTED'].includes(r.status));
+
+      const active = rides.find(r => ['REQUESTED', 'ACCEPTED', 'STARTED'].includes(r.status));
       setActiveRide(active || null);
 
-      // Past recent rides
-      const past = rides.filter((r) => ['COMPLETED', 'CANCELLED'].includes(r.status));
-      setRecentRides(past.slice(0, 3));
+      const past = rides.filter(r => ['COMPLETED', 'CANCELLED'].includes(r.status));
+      setRecentRides(past.slice(0, 5));
+
+      // Fetch mobility intelligence summary
+      try {
+        const mobRes = await mobilityService.getMyMobilitySummary();
+        if (mobRes?.success && mobRes.data) {
+          setMobilitySummary(mobRes.data);
+        }
+      } catch (e) {
+        // Silently ignore if not available
+      }
     } catch (err) {
-      console.error("Error fetching passenger dashboard data", err);
+      console.error('Dashboard data error:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    fetchDashboardData();
+    fetchData();
 
-    // Subscribe to live ride events
-    const unsubscribe = subscribe((event) => {
-      if (
-        event.type === 'DRIVER_MATCHED' ||
-        event.type === 'DRIVER_REASSIGNED' ||
-        event.type === 'RIDE_ACCEPTED' ||
-        event.type === 'RIDE_STARTED' ||
-        event.type === 'RIDE_COMPLETED' ||
-        event.type === 'RIDE_CANCELLED' ||
-        event.type === 'NO_DRIVER_AVAILABLE'
-      ) {
-        fetchDashboardData();
-      }
+    // Geolocation for passenger marker
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        () => {} // silent fail
+      );
+    }
+
+    // Live ride events
+    const unsub = subscribe((event) => {
+      const RIDE_EVENTS = [
+        'DRIVER_MATCHED', 'DRIVER_REASSIGNED', 'RIDE_ACCEPTED',
+        'RIDE_STARTED', 'RIDE_COMPLETED', 'RIDE_CANCELLED', 'NO_DRIVER_AVAILABLE',
+      ];
+      if (RIDE_EVENTS.includes(event.type)) fetchData();
     });
 
-    return () => unsubscribe();
-  }, [subscribe]);
+    return () => unsub();
+  }, [subscribe, fetchData]);
 
-  const handleSearch = (e) => {
-    e.preventDefault();
-    if (pickup && dropoff) {
-      navigate(`/book-ride?pickup=${encodeURIComponent(pickup)}&dropoff=${encodeURIComponent(dropoff)}`);
+  // ── Command bar handlers ───────────────────────────────────────────────
+  const handleImageSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('Image size must be under 10MB');
+      return;
+    }
+    setImageFile(file);
+    const reader = new FileReader();
+    reader.onload = () => setImagePreview(reader.result);
+    reader.readAsDataURL(file);
+    toast.success('Location photo attached');
+  };
+
+  const removeImage = () => {
+    setImageFile(null);
+    setImagePreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleCommandSubmit = async (e) => {
+    e?.preventDefault();
+    const q = query.trim();
+
+    // If image attached, process with vision service
+    if (imageFile) {
+      setUploadingImage(true);
+      try {
+        const visionRes = await analyzeLocationImage(
+          imageFile,
+          q,
+          userLocation ? { latitude: userLocation.lat, longitude: userLocation.lng } : null
+        );
+        removeImage();
+        const contextualQuery = q ? `${q} (Location from photo: ${visionRes.message})` : `Location from photo: ${visionRes.message}`;
+        navigate(`/assistant?q=${encodeURIComponent(contextualQuery)}`);
+      } catch (err) {
+        toast.error('Failed to process image');
+      } finally {
+        setUploadingImage(false);
+      }
+      return;
+    }
+
+    if (!q) return;
+
+    // Check if it's a destination (short phrase → book ride)
+    // vs a question (contains ?, "how", "what", "why" → AI assistant)
+    const aiKeywords = /\?|how|what|why|policy|cancel|help|fare estimate|earnings|where is|book|chhod|jana hai|jaana hai/i;
+    if (aiKeywords.test(q)) {
+      navigate(`/assistant?q=${encodeURIComponent(q)}`);
     } else {
-      navigate('/book-ride');
+      // Treat as destination
+      navigate(`/book-ride?dropoff=${encodeURIComponent(q)}`);
     }
   };
 
-  // Build map markers for preview
+  const handleSuggestionClick = (destination) => {
+    navigate(`/book-ride?dropoff=${encodeURIComponent(destination)}`);
+  };
+
+  const handleVoice = () => {
+    if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+      toast('Voice input is not supported in this browser. Try Chrome.', { icon: '🎙️' });
+      return;
+    }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new SR();
+    rec.lang = 'en-IN'; // Indian English
+    rec.interimResults = false;
+    setIsListening(true);
+
+    rec.onresult = (e) => {
+      const transcript = e.results[0][0].transcript;
+      setQuery(transcript);
+      setIsListening(false);
+    };
+    rec.onerror = () => { setIsListening(false); };
+    rec.onend   = () => { setIsListening(false); };
+    rec.start();
+  };
+
+  const handleCamera = () => {
+    fileInputRef.current?.click();
+  };
+
+  // ── Map markers ────────────────────────────────────────────────────────
   const mapMarkers = [];
+
+  if (userLocation) {
+    mapMarkers.push({
+      lat: userLocation.lat,
+      lng: userLocation.lng,
+      type: 'passenger',
+      popup: 'Your location',
+    });
+  }
+
   if (activeRide?.pickup_latitude && activeRide?.pickup_longitude) {
     mapMarkers.push({
       lat: activeRide.pickup_latitude,
@@ -92,306 +246,434 @@ const PassengerDashboard = () => {
     });
   }
 
+  const suggestions = buildSuggestions(recentRides);
+  const mapCenter = userLocation
+    ? [userLocation.lat, userLocation.lng]
+    : [12.9716, 77.5946];
+
   return (
-    <div className="flex flex-col gap-6 lg:gap-8 max-w-6xl mx-auto pb-16 animate-fade-in">
-      {/* Hero Welcome & Mobility Command Header */}
-      <div className="card-panel relative overflow-hidden bg-gradient-to-r from-[#0D141B] via-[#101820] to-[#0A0F14] border border-[#1E293B] p-6 md:p-8 rounded-2xl shadow-xl">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-[#38BDF8]/5 rounded-full blur-3xl pointer-events-none" />
-        
-        <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div>
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#101820] border border-[#38BDF8]/30 text-[#38BDF8] text-xs font-semibold uppercase tracking-wider mb-3">
-              <span className="w-2 h-2 rounded-full bg-[#38BDF8] animate-ping" />
-              Mobility Core Active
-            </div>
-            <h1 className="text-2xl md:text-3xl font-bold text-[#F5F7FA] tracking-tight">
-              Good {new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, {user?.name?.split(' ')[0]} 👋
-            </h1>
-            <p className="text-sm text-gray-400 mt-1 max-w-xl">
-              Where would you like to travel today? RideNow AI dispatch is standing by with live route optimization.
-            </p>
-          </div>
+    <div className="flex flex-col gap-6 max-w-6xl mx-auto pb-20 animate-[page-enter_300ms_ease-out]">
 
-          {/* Top Quick Actions */}
-          <div className="flex flex-wrap items-center gap-3">
-            <Link
-              to="/assistant"
-              className="flex items-center gap-2.5 px-4 py-2.5 bg-[#101820] border border-[#1E293B] hover:border-[#38BDF8]/60 rounded-xl text-xs font-bold text-gray-200 hover:text-[#38BDF8] transition-all shadow-sm group"
-            >
-              <Sparkles size={16} className="text-[#38BDF8] group-hover:rotate-12 transition-transform" />
-              <span>Nova AI</span>
-            </Link>
-            <Link
-              to="/book-ride"
-              className="btn btn-primary px-5 py-2.5 text-xs font-bold uppercase tracking-wider rounded-xl flex items-center gap-2 shadow-[0_0_20px_rgba(56,189,248,0.25)]"
-            >
-              <Navigation size={15} />
-              <span>Book Ride</span>
-            </Link>
-          </div>
-        </div>
-      </div>
-
-      {/* ACTIVE RIDE CARD (If Active Trip in Progress) */}
+      {/* ── Active Ride Banner ──────────────────────────────────────── */}
       {activeRide && (
-        <div className="card-interactive p-6 rounded-2xl bg-gradient-to-r from-[#0E1A24] via-[#101820] to-[#0A0F14] border-2 border-[#38BDF8]/50 shadow-[0_0_30px_rgba(56,189,248,0.15)] flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div className="flex items-start gap-4">
-            <div className="w-12 h-12 rounded-xl bg-[#38BDF8]/15 border border-[#38BDF8]/40 text-[#38BDF8] flex items-center justify-center shrink-0 shadow-[0_0_15px_rgba(56,189,248,0.2)]">
-              <Car size={24} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2.5 py-0.5 bg-[#38BDF8] text-[#05070A] rounded-md font-bold">
-                  {activeRide.status}
-                </span>
-                <span className="text-xs font-mono text-gray-400">Ride #{activeRide.id}</span>
-                <span className="flex items-center gap-1 text-[11px] text-[#38BDF8] font-semibold">
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#38BDF8] animate-pulse" /> Live Tracking
-                </span>
+        <div className="relative overflow-hidden rounded-2xl border-2 border-[#38BDF8]/50 bg-gradient-to-r from-[#0E1A24] via-[#101820] to-[#0A0F14] shadow-[0_0_30px_rgba(56,189,248,0.12)]">
+          <div className="absolute top-0 right-0 w-64 h-64 bg-[#38BDF8]/5 rounded-full blur-3xl pointer-events-none" />
+          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5">
+            <div className="flex items-center gap-4">
+              <div className="w-11 h-11 rounded-xl bg-[#38BDF8]/15 border border-[#38BDF8]/40 text-[#38BDF8] flex items-center justify-center shrink-0 shadow-[0_0_15px_rgba(56,189,248,0.2)]">
+                <Car size={22} />
               </div>
-              <h3 className="text-lg font-bold text-[#F5F7FA] mt-1.5">{activeRide.dropoff_location}</h3>
-              <p className="text-xs text-gray-400 mt-0.5">
-                Pickup: {activeRide.pickup_location} · {activeRide.distance_km} km
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-5">
-            {activeRide.fare && (
-              <div className="text-right">
-                <div className="text-2xl font-bold text-[#F5F7FA]">₹{Number(activeRide.fare).toFixed(2)}</div>
-                <span className="text-[10px] text-gray-400 uppercase tracking-widest font-mono">Trip Fare</span>
+              <div>
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 bg-[#38BDF8] text-[#05070A] rounded">
+                    {activeRide.status}
+                  </span>
+                  <span className="flex items-center gap-1 text-[11px] text-[#38BDF8] font-semibold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#38BDF8] animate-pulse" />
+                    Live
+                  </span>
+                </div>
+                <p className="text-sm font-bold text-[#F5F7FA]">{activeRide.dropoff_location}</p>
+                <p className="text-[11px] text-gray-400">From: {activeRide.pickup_location} · {activeRide.distance_km} km</p>
               </div>
-            )}
+            </div>
             <Link
               to={`/rides/${activeRide.id}`}
-              className="btn btn-primary px-6 py-3 text-xs font-bold uppercase tracking-wider rounded-xl flex items-center gap-2 shadow-[0_0_20px_rgba(56,189,248,0.3)]"
+              className="btn btn-primary text-xs font-bold uppercase tracking-wider rounded-xl px-5 py-2.5 shadow-[0_0_20px_rgba(56,189,248,0.3)] whitespace-nowrap flex items-center gap-2"
             >
-              <span>Track Ride Live</span>
-              <ArrowRight size={16} />
+              Track Live <ArrowRight size={14} />
             </Link>
           </div>
         </div>
       )}
 
-      {/* Main Operations Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8">
-        
-        {/* Left Column: Instant Booking & Quick Actions */}
-        <div className="lg:col-span-5 flex flex-col gap-6">
-          
-          {/* Instant Booking Card */}
-          <div className="card p-6 border border-[#1E293B] bg-[#0A0F14] rounded-2xl shadow-lg relative overflow-hidden">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-bold text-[#F5F7FA] flex items-center gap-2">
-                <Navigation size={18} className="text-[#38BDF8]" />
-                Request a Ride
-              </h2>
-              <span className="text-[10px] font-mono text-[#38BDF8] bg-[#38BDF8]/10 px-2 py-0.5 rounded border border-[#38BDF8]/20">
-                OSRM Fast Engine
-              </span>
-            </div>
-            
-            <form onSubmit={handleSearch} className="space-y-4">
-              <div className="relative">
-                <div className="absolute left-4 top-1/2 -translate-y-1/2 flex flex-col items-center gap-1 z-10">
-                  <div className="w-2.5 h-2.5 rounded-full bg-[#38BDF8] shadow-[0_0_8px_#38BDF8]"></div>
-                  <div className="w-0.5 h-7 bg-[#1E293B]"></div>
-                  <div className="w-2.5 h-2.5 rounded-sm bg-[#10B981]"></div>
-                </div>
-                
-                <div className="space-y-3 pl-8">
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-gray-400 tracking-wider block mb-1">Pickup Point</label>
-                    <input
-                      type="text"
-                      value={pickup}
-                      onChange={(e) => setPickup(e.target.value)}
-                      placeholder="Current location or pickup address..."
-                      className="input-field text-xs sm:text-sm bg-[#101820] border-[#1E293B]"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase font-bold text-gray-400 tracking-wider block mb-1">Destination</label>
-                    <input
-                      type="text"
-                      value={dropoff}
-                      onChange={(e) => setDropoff(e.target.value)}
-                      placeholder="Where to? (Destination address)"
-                      className="input-field text-xs sm:text-sm bg-[#101820] border-[#1E293B]"
-                    />
-                  </div>
-                </div>
-              </div>
+      {/* ── Hero: AI Command ────────────────────────────────────────── */}
+      <div className="relative overflow-hidden rounded-3xl bg-[#080E15] border border-[#1A2535]">
+        {/* Background glow */}
+        <div className="absolute inset-0 pointer-events-none">
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-[#38BDF8]/[0.04] rounded-full blur-3xl" />
+        </div>
 
-              <button 
-                type="submit" 
-                className="btn btn-primary w-full h-12 text-xs font-bold uppercase tracking-wider mt-2 shadow-[0_0_20px_rgba(56,189,248,0.25)] rounded-xl"
+        <div className="relative z-10 px-6 pt-8 pb-6 md:px-10 md:pt-10 md:pb-8">
+          {/* Greeting */}
+          <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#101820] border border-[#38BDF8]/25 text-[#38BDF8] text-[10px] font-semibold tracking-widest uppercase">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#38BDF8] animate-pulse" />
+              AI Ready
+            </div>
+          </div>
+
+          <h1 className="text-2xl md:text-4xl font-bold text-[#F5F7FA] mt-3 mb-1" style={{ letterSpacing: '-0.02em' }}>
+            {getGreeting()}, {user?.name?.split(' ')[0] || 'there'}.
+          </h1>
+          <p className="text-base md:text-lg text-gray-400 mb-7">
+            Where do you want to go?
+          </p>
+
+          {/* AI Command Bar */}
+          <form onSubmit={handleCommandSubmit}>
+            {/* Hidden file input */}
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleImageSelect}
+              accept="image/*"
+              className="hidden"
+            />
+
+            {/* Attached image thumbnail preview */}
+            {imagePreview && (
+              <div className="flex items-center gap-2 mb-2 p-2 rounded-xl bg-[#101820] border border-[#38BDF8]/40 w-fit">
+                <img
+                  src={imagePreview}
+                  alt="Location preview"
+                  className="w-10 h-10 object-cover rounded-lg border border-[#1E293B]"
+                />
+                <div className="text-xs">
+                  <p className="font-semibold text-gray-200">Location photo attached</p>
+                  <p className="text-[10px] text-gray-400">Will analyze landmarks upon sending</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={removeImage}
+                  className="p-1 text-gray-400 hover:text-red-400 transition-colors ml-1"
+                  aria-label="Remove image"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 bg-[#0D141B] border border-[#1E293B] rounded-2xl px-4 py-3 focus-within:border-[#38BDF8]/50 focus-within:shadow-[0_0_0_3px_rgba(56,189,248,0.08)] transition-all">
+              <MapPin size={18} className="text-[#38BDF8] shrink-0" />
+
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder="Destination, or ask Nova anything…"
+                className="flex-1 bg-transparent text-[#F5F7FA] placeholder-gray-500 text-sm md:text-base focus:outline-none"
+                aria-label="Destination or AI query"
+              />
+
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery('')}
+                  className="text-gray-500 hover:text-gray-300 transition-colors"
+                  aria-label="Clear"
+                >
+                  <X size={15} />
+                </button>
+              )}
+
+              {/* Voice input */}
+              <button
+                type="button"
+                onClick={handleVoice}
+                className={`p-2 rounded-xl transition-all ${
+                  isListening
+                    ? 'bg-[#38BDF8]/20 text-[#38BDF8] shadow-[0_0_12px_rgba(56,189,248,0.3)]'
+                    : 'text-gray-500 hover:text-[#38BDF8] hover:bg-[#38BDF8]/10'
+                }`}
+                aria-label="Voice input"
               >
-                Estimate Fare & Route
+                {isListening ? (
+                  <span className="flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#38BDF8] animate-ping" />
+                    <Mic size={16} />
+                  </span>
+                ) : (
+                  <Mic size={16} />
+                )}
               </button>
-            </form>
-          </div>
 
-          {/* Quick Action Navigation Tiles */}
-          <div className="grid grid-cols-2 gap-3.5">
-            <Link 
-              to="/book-ride" 
-              className="card-interactive p-4 rounded-xl flex flex-col items-center justify-center text-center gap-2 bg-[#0A0F14] border border-[#1E293B] group"
-            >
-              <div className="w-10 h-10 rounded-xl bg-[#101820] text-[#38BDF8] border border-[#1E293B] flex items-center justify-center group-hover:bg-[#38BDF8] group-hover:text-[#05070A] transition-colors shadow-sm">
-                <Navigation size={18} />
-              </div>
-              <span className="text-xs font-semibold text-[#F5F7FA]">Book Ride</span>
-              <span className="text-[10px] text-gray-500">Instant dispatch</span>
-            </Link>
-            
-            <Link 
-              to="/rides" 
-              className="card-interactive p-4 rounded-xl flex flex-col items-center justify-center text-center gap-2 bg-[#0A0F14] border border-[#1E293B] group"
-            >
-              <div className="w-10 h-10 rounded-xl bg-[#101820] text-gray-400 border border-[#1E293B] flex items-center justify-center group-hover:border-[#38BDF8]/50 group-hover:text-[#38BDF8] transition-colors shadow-sm">
-                <Clock size={18} />
-              </div>
-              <span className="text-xs font-semibold text-[#F5F7FA]">Ride History</span>
-              <span className="text-[10px] text-gray-500">Past journeys</span>
-            </Link>
+              {/* Camera / image input */}
+              <button
+                type="button"
+                onClick={handleCamera}
+                className="p-2 rounded-xl text-gray-500 hover:text-[#38BDF8] hover:bg-[#38BDF8]/10 transition-all"
+                aria-label="Image location input"
+              >
+                <Camera size={16} />
+              </button>
 
-            <Link 
-              to="/payments" 
-              className="card-interactive p-4 rounded-xl flex flex-col items-center justify-center text-center gap-2 bg-[#0A0F14] border border-[#1E293B] group"
-            >
-              <div className="w-10 h-10 rounded-xl bg-[#101820] text-emerald-400 border border-[#1E293B] flex items-center justify-center group-hover:border-emerald-500/50 transition-colors shadow-sm">
-                <span className="font-bold text-base">₹</span>
-              </div>
-              <span className="text-xs font-semibold text-[#F5F7FA]">Payments</span>
-              <span className="text-[10px] text-gray-500">Fares & ledger</span>
-            </Link>
-
-            <Link 
-              to="/assistant" 
-              className="card-interactive p-4 rounded-xl flex flex-col items-center justify-center text-center gap-2 bg-[#0A0F14] border border-[#1E293B] group"
-            >
-              <div className="w-10 h-10 rounded-xl bg-[#101820] text-[#38BDF8] border border-[#1E293B] flex items-center justify-center group-hover:bg-[#38BDF8]/20 transition-colors shadow-sm">
-                <Bot size={18} />
-              </div>
-              <span className="text-xs font-semibold text-[#F5F7FA]">Nova Assistant</span>
-              <span className="text-[10px] text-gray-500">AI Mobility Copilot</span>
-            </Link>
-          </div>
-
-          {/* AI Prompts Card */}
-          <div className="card p-5 border border-[#1E293B] bg-[#101820] rounded-2xl">
-            <div className="flex items-center gap-2 mb-3">
-              <Sparkles size={16} className="text-[#38BDF8]" />
-              <h3 className="text-xs font-bold uppercase tracking-wider text-[#F5F7FA]">Ask Nova Mobility AI</h3>
+              {/* Submit */}
+              <button
+                type="submit"
+                disabled={!query.trim()}
+                className="p-2 rounded-xl bg-[#38BDF8] text-[#05070A] disabled:opacity-30 hover:bg-[#5CC8FF] transition-all shadow-sm"
+                aria-label="Go"
+              >
+                <Send size={15} />
+              </button>
             </div>
-            <div className="space-y-2">
+          </form>
+
+          {/* Smart destination chips */}
+          {suggestions.length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-4">
+              {suggestions.map((dest, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleSuggestionClick(dest)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#101820] border border-[#1E293B] text-xs text-gray-300 hover:text-[#38BDF8] hover:border-[#38BDF8]/40 transition-all"
+                >
+                  <Clock size={11} className="text-gray-500 shrink-0" />
+                  <span className="truncate max-w-[140px]">{dest}</span>
+                </button>
+              ))}
+              <Link
+                to="/assistant"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#38BDF8]/10 border border-[#38BDF8]/25 text-xs text-[#38BDF8] hover:bg-[#38BDF8]/20 transition-all"
+              >
+                <Sparkles size={11} />
+                Ask Nova AI
+              </Link>
+              <button
+                onClick={() => {
+                  setQuery('Plan a trip to ');
+                  if (inputRef.current) inputRef.current.focus();
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#101820] border border-[#1E293B] text-xs text-sky-400 hover:border-[#38BDF8]/40 transition-all"
+              >
+                <Clock size={11} /> Plan a Trip
+              </button>
+              <button
+                onClick={() => {
+                  setQuery('How much did I spend this month?');
+                  if (inputRef.current) inputRef.current.focus();
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#101820] border border-[#1E293B] text-xs text-amber-400 hover:border-amber-400/40 transition-all"
+              >
+                <CreditCard size={11} /> My Spend
+              </button>
+            </div>
+          )}
+
+          {suggestions.length === 0 && (
+            <div className="flex flex-wrap gap-2 mt-4">
               {[
-                "Estimate fare for a 12 km trip",
-                "What is the platform cancellation policy?",
-                "Where is my active driver?"
-              ].map((prompt, i) => (
+                { label: 'Book a ride', icon: <Navigation size={11} />, to: '/book-ride' },
+                { label: 'Plan a trip', icon: <Clock size={11} />, to: '/assistant?q=Plan a trip to Airport' },
+                { label: 'My ride spend', icon: <CreditCard size={11} />, to: '/assistant?q=How much did I spend this month?' },
+                { label: 'Smart pickup points', icon: <MapPin size={11} />, to: '/assistant?q=Best pickup points near me' },
+                { label: 'Cancellation policy', icon: <ShieldCheck size={11} />, to: '/assistant?q=What is the cancellation policy?' },
+              ].map((chip, i) => (
                 <Link
                   key={i}
-                  to={`/assistant?q=${encodeURIComponent(prompt)}`}
-                  className="flex items-center justify-between p-2.5 rounded-xl bg-[#0A0F14] border border-[#1E293B] hover:border-[#38BDF8]/50 text-xs text-gray-300 hover:text-[#38BDF8] transition-all group"
+                  to={chip.to}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#101820] border border-[#1E293B] text-xs text-gray-300 hover:text-[#38BDF8] hover:border-[#38BDF8]/40 transition-all"
                 >
-                  <span className="truncate mr-2">“{prompt}”</span>
-                  <ChevronRight size={14} className="text-gray-500 group-hover:text-[#38BDF8] group-hover:translate-x-0.5 transition-transform shrink-0" />
+                  <span className="text-gray-500">{chip.icon}</span>
+                  {chip.label}
                 </Link>
               ))}
             </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Predictive Mobility Intelligence Card ────────────────────────── */}
+      {mobilitySummary && (mobilitySummary.lifetime_stats?.completed_trips > 0 || mobilitySummary.recent_30_days?.completed_trips > 0) && (
+        <div className="relative overflow-hidden rounded-2xl border border-[#38BDF8]/20 bg-gradient-to-r from-[#0C1924]/90 via-[#0A131C] to-[#070D12] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg animate-[fade-in_200ms_ease-out]">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-[#38BDF8]/15 border border-[#38BDF8]/30 flex items-center justify-center text-[#38BDF8] shrink-0">
+              <Sparkles size={18} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-[#38BDF8] bg-[#38BDF8]/10 px-2 py-0.5 rounded">
+                  AI Mobility Insights
+                </span>
+                <span className="text-xs text-gray-400">
+                  {mobilitySummary.preferred_travel_window || 'Regular'} Traveler
+                </span>
+              </div>
+              <p className="text-xs text-gray-200 mt-0.5">
+                {mobilitySummary.top_destinations?.length > 0 ? (
+                  <>Frequent route: <span className="font-semibold text-white">{mobilitySummary.top_destinations[0].destination}</span> ({mobilitySummary.top_destinations[0].trips} trips) · ₹{mobilitySummary.lifetime_stats?.total_spend_inr} spent</>
+                ) : (
+                  <>{mobilitySummary.lifetime_stats?.completed_trips} completed trips · Lifetime spend: ₹{mobilitySummary.lifetime_stats?.total_spend_inr}</>
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                const dest = mobilitySummary.top_destinations?.[0]?.destination || 'Railway Station';
+                setQuery(`Plan my trip to ${dest}`);
+                if (inputRef.current) inputRef.current.focus();
+              }}
+              className="px-3 py-1.5 rounded-lg bg-[#38BDF8]/10 hover:bg-[#38BDF8]/20 border border-[#38BDF8]/30 text-xs font-semibold text-[#38BDF8] transition-colors flex items-center gap-1.5"
+            >
+              <Clock size={12} /> Plan Commute
+            </button>
+            <button
+              onClick={() => {
+                setQuery('How much did I spend this month?');
+                if (inputRef.current) inputRef.current.focus();
+              }}
+              className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-gray-300 transition-colors"
+            >
+              View Spend
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Main Grid: Map + Sidebar ─────────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+        {/* Map — 7 columns, full height */}
+        <div className="lg:col-span-7 h-[320px] lg:h-[420px] relative group cursor-pointer rounded-2xl overflow-hidden border border-[#1E293B] shadow-float"
+          onClick={() => navigate('/book-ride')}
+        >
+          <Map
+            center={mapCenter}
+            markers={mapMarkers}
+            interactive={false}
+          />
+          {/* Map overlay CTA */}
+          <div className="absolute inset-0 bg-gradient-to-t from-[#05070A]/70 via-transparent to-transparent pointer-events-none" />
+          <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-xs font-semibold text-gray-200">
+                {mapMarkers.length > 0 ? 'Location acquired' : 'Map ready'}
+              </span>
+            </div>
+            <span className="bg-[#101820]/90 backdrop-blur-md border border-[#1E293B] px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-2 text-[#38BDF8] shadow-lg opacity-0 group-hover:opacity-100 transition-opacity">
+              <Navigation size={13} />
+              Tap to book
+            </span>
           </div>
         </div>
 
-        {/* Right Column: Map Preview & Recent Trips Cards */}
-        <div className="lg:col-span-7 flex flex-col gap-6">
-          
-          {/* Map Preview Card */}
-          <div 
-            className="card p-1.5 h-64 lg:h-[300px] relative overflow-hidden group cursor-pointer bg-[#0A0F14] rounded-2xl border border-[#1E293B]" 
-            onClick={() => navigate('/book-ride')}
-          >
-            <Map markers={mapMarkers} interactive={false} />
-            <div className="absolute bottom-4 right-4 z-20">
-              <span className="bg-[#101820]/90 backdrop-blur-md border border-[#1E293B] px-3.5 py-1.5 rounded-full text-xs font-semibold flex items-center gap-2 text-[#38BDF8] shadow-lg">
-                <Search size={14} /> Full Route Map
-              </span>
-            </div>
+        {/* Right sidebar — Quick actions + Recent rides */}
+        <div className="lg:col-span-5 flex flex-col gap-4">
+
+          {/* Quick action tiles */}
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              {
+                to: '/book-ride',
+                icon: <Navigation size={20} />,
+                label: 'Book Ride',
+                sub: 'Instant dispatch',
+                iconColor: 'text-[#38BDF8]',
+                iconBg: 'bg-[#38BDF8]/10',
+                hoverBorder: 'hover:border-[#38BDF8]/50',
+              },
+              {
+                to: '/assistant',
+                icon: <Bot size={20} />,
+                label: 'Nova AI',
+                sub: 'Voice · Text · Image',
+                iconColor: 'text-violet-400',
+                iconBg: 'bg-violet-500/10',
+                hoverBorder: 'hover:border-violet-500/40',
+              },
+              {
+                to: '/rides',
+                icon: <Clock size={20} />,
+                label: 'My Rides',
+                sub: 'History & receipts',
+                iconColor: 'text-amber-400',
+                iconBg: 'bg-amber-500/10',
+                hoverBorder: 'hover:border-amber-500/40',
+              },
+              {
+                to: '/payments',
+                icon: <CreditCard size={20} />,
+                label: 'Payments',
+                sub: 'Fares & ledger',
+                iconColor: 'text-emerald-400',
+                iconBg: 'bg-emerald-500/10',
+                hoverBorder: 'hover:border-emerald-500/40',
+              },
+            ].map((item, i) => (
+              <Link
+                key={i}
+                to={item.to}
+                className={`card-interactive p-4 rounded-xl flex flex-col items-start gap-2.5 group ${item.hoverBorder}`}
+              >
+                <div className={`w-10 h-10 rounded-xl ${item.iconBg} ${item.iconColor} flex items-center justify-center border border-[#1E293B] group-hover:scale-105 transition-transform`}>
+                  {item.icon}
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-[#F5F7FA]">{item.label}</p>
+                  <p className="text-[10px] text-gray-500">{item.sub}</p>
+                </div>
+              </Link>
+            ))}
           </div>
 
-          {/* Recent Rides Module */}
-          <div className="card p-6 border border-[#1E293B] bg-[#0A0F14] rounded-2xl">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="text-base font-bold text-[#F5F7FA]">Recent Journeys</h3>
-                <p className="text-xs text-gray-400">Your latest transit records and telemetry</p>
-              </div>
-              <Link to="/rides" className="text-xs font-semibold text-[#38BDF8] hover:underline flex items-center gap-1">
-                View All <ChevronRight size={14} />
+          {/* Recent rides */}
+          <div className="card flex-1 p-4 rounded-2xl bg-[#0A0F14] border border-[#1E293B]">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold text-[#F5F7FA]">Recent Journeys</h3>
+              <Link to="/rides" className="text-[11px] font-semibold text-[#38BDF8] hover:underline flex items-center gap-0.5">
+                All <ChevronRight size={13} />
               </Link>
             </div>
-            
+
             {loading ? (
-              <div className="space-y-3">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="animate-pulse flex gap-4 p-4 bg-[#101820] rounded-xl border border-[#1E293B]">
-                    <div className="w-10 h-10 bg-gray-800 rounded-lg shrink-0"></div>
-                    <div className="flex-1 space-y-2 py-1">
-                      <div className="h-4 bg-gray-800 rounded w-3/4"></div>
-                      <div className="h-3 bg-gray-800 rounded w-1/4"></div>
+              <div className="space-y-2.5">
+                {[1, 2].map(i => (
+                  <div key={i} className="animate-pulse flex gap-3 p-3 bg-[#101820] rounded-xl border border-[#1E293B]">
+                    <div className="w-9 h-9 bg-gray-800 rounded-lg shrink-0" />
+                    <div className="flex-1 space-y-1.5 py-0.5">
+                      <div className="h-3 bg-gray-800 rounded w-3/4" />
+                      <div className="h-2.5 bg-gray-800 rounded w-1/3" />
                     </div>
                   </div>
                 ))}
               </div>
             ) : recentRides.length > 0 ? (
-              <div className="space-y-3">
-                {recentRides.map((ride) => (
-                  <Link 
-                    to={`/rides/${ride.id}`} 
+              <div className="space-y-2">
+                {recentRides.slice(0, 3).map((ride) => (
+                  <Link
+                    to={`/rides/${ride.id}`}
                     key={ride.id}
-                    className="card-interactive flex items-center justify-between p-4 rounded-xl bg-[#101820] border border-[#1E293B] hover:border-[#38BDF8]/40 transition-all group"
+                    className="card-interactive flex items-center justify-between p-3 rounded-xl bg-[#101820] border border-[#1E293B] hover:border-[#38BDF8]/30 transition-all group"
                   >
-                    <div className="flex items-center gap-3.5 overflow-hidden">
-                      <div className="w-10 h-10 rounded-xl bg-[#0A0F14] border border-[#1E293B] text-gray-400 flex items-center justify-center shrink-0 group-hover:text-[#38BDF8] group-hover:border-[#38BDF8]/30 transition-colors">
-                        <MapPin size={18} />
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <div className="w-9 h-9 rounded-xl bg-[#0A0F14] border border-[#1E293B] text-gray-500 flex items-center justify-center shrink-0 group-hover:text-[#38BDF8] transition-colors">
+                        <MapPin size={15} />
                       </div>
                       <div className="truncate">
-                        <p className="text-sm font-semibold text-[#F5F7FA] truncate">
+                        <p className="text-xs font-semibold text-[#F5F7FA] truncate">
                           {ride.dropoff_location}
                         </p>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          {formatDistanceToNow(new Date(ride.created_at), { addSuffix: true })} · {ride.distance_km} km
+                        <p className="text-[10px] text-gray-500 mt-0.5">
+                          {formatDistanceToNow(new Date(ride.created_at), { addSuffix: true })}
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-4 shrink-0">
+                    <div className="flex items-center gap-2 shrink-0">
                       {ride.fare && (
-                        <span className="text-sm font-mono font-bold text-[#F5F7FA] px-2.5 py-1 bg-[#0A0F14] rounded-lg border border-[#1E293B]">
-                          ₹{Number(ride.fare).toFixed(2)}
+                        <span className="text-xs font-mono font-bold text-[#F5F7FA]">
+                          ₹{Number(ride.fare).toFixed(0)}
                         </span>
                       )}
-                      <ChevronRight size={16} className="text-gray-500 group-hover:text-[#38BDF8] transition-colors" />
+                      <ChevronRight size={13} className="text-gray-600 group-hover:text-[#38BDF8] transition-colors" />
                     </div>
                   </Link>
                 ))}
               </div>
             ) : (
-              <div className="text-center py-10">
-                <div className="w-12 h-12 rounded-xl bg-[#101820] border border-[#1E293B] flex items-center justify-center mx-auto mb-3 text-gray-500">
-                  <Navigation size={22} />
-                </div>
-                <p className="text-gray-300 text-sm font-semibold">No past journeys on record yet</p>
-                <p className="text-gray-500 text-xs mt-1">Ready for your first ride? Request one using the booking box.</p>
+              <div className="text-center py-8">
+                <Navigation size={22} className="text-gray-600 mx-auto mb-2" />
+                <p className="text-xs text-gray-400 font-medium">No journeys yet</p>
+                <p className="text-[11px] text-gray-600 mt-0.5">Your first ride will appear here.</p>
               </div>
             )}
           </div>
-          
         </div>
       </div>
     </div>
   );
-};
-
-export default PassengerDashboard;
+}

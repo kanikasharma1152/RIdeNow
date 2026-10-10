@@ -68,6 +68,131 @@
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
+
+  /* ── Custom Leaflet Marker Animations ───────────────────────────── */
+  .custom-leaflet-icon {
+    background: transparent !important;
+    border: none !important;
+  }
+
+  /* Pickup pulse ring */
+  .marker-pickup-ring {
+    animation: pickup-pulse 2s ease-out infinite;
+  }
+
+  /* Driver car bounce */
+  .marker-driver-car {
+    animation: driver-float 3s ease-in-out infinite;
+  }
+
+  /* Nearby driver fade in */
+  .marker-nearby {
+    animation: nearby-appear 0.4s ease-out both;
+  }
+
+  /* Route flow animation */
+  .leaflet-interactive.route-animated {
+    stroke-dasharray: 12 6;
+    animation: route-flow 1.2s linear infinite;
+  }
 }
 
-@keyframes page-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+/* ── Keyframes ──────────────────────────────────────────────────────────── */
+
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Opening animation keyframes */
+@keyframes road-draw {
+  0%   { stroke-dashoffset: 800; opacity: 0; }
+  20%  { opacity: 1; }
+  100% { stroke-dashoffset: 0; opacity: 1; }
+}
+
+@keyframes car-enter {
+  0%   { transform: translateX(-120px) translateY(0px); opacity: 0; }
+  15%  { opacity: 1; }
+  85%  { opacity: 1; }
+  100% { transform: translateX(0px) translateY(0px); opacity: 1; }
+}
+
+@keyframes car-drive {
+  0%   { transform: translateX(-200px); opacity: 0; }
+  10%  { opacity: 1; }
+  60%  { transform: translateX(0px); opacity: 1; }
+  100% { transform: translateX(0px); opacity: 1; }
+}
+
+@keyframes logo-appear {
+  0%   { opacity: 0; transform: scale(0.92) translateY(8px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes ai-online-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+@keyframes fade-out-up {
+  0%   { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-16px); }
+}
+
+@keyframes screen-reveal {
+  0%   { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+/* Map marker keyframes */
+@keyframes pickup-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.5); }
+  70%  { box-shadow: 0 0 0 14px rgba(56, 189, 248, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, 0); }
+}
+
+@keyframes driver-float {
+  0%, 100% { transform: translateY(0px); }
+  50%       { transform: translateY(-3px); }
+}
+
+@keyframes nearby-appear {
+  from { opacity: 0; transform: scale(0.7); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes route-flow {
+  to { stroke-dashoffset: -18; }
+}
+
+@keyframes destination-glow {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(16, 185, 129, 0.6)); }
+  50%       { filter: drop-shadow(0 0 12px rgba(16, 185, 129, 0.9)); }
+}
+
+@keyframes pickup-glow {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(56, 189, 248, 0.6)); }
+  50%       { filter: drop-shadow(0 0 14px rgba(56, 189, 248, 0.95)); }
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ── Reduced Motion ─────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .marker-pickup-ring,
+  .marker-driver-car,
+  .marker-nearby {
+    animation: none !important;
+  }
+}

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { getMe, loginUser, registerUser, logoutUser } from '../services/authService';
+import { getMe, loginUser, registerUser, logoutUser, loginWithGoogle } from '../services/authService';
 
 export const AuthContext = createContext();
 
@@ -35,6 +35,14 @@ export const AuthProvider = ({ children }) => {
     return userData;
   };
 
+  const loginGoogle = async (credential, role = 'passenger') => {
+    const data = await loginWithGoogle(credential, role);
+    localStorage.setItem('token', data.access_token);
+    const userData = await getMe();
+    setUser(userData);
+    return userData;
+  };
+
   const register = async (userData) => {
     const data = await registerUser(userData);
     return data;
@@ -53,7 +61,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, setUser, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, setUser, loading, login, loginGoogle, register, logout }}>
       {children}
     </AuthContext.Provider>
   );

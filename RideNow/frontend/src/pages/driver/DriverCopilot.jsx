@@ -486,9 +486,9 @@ export default function DriverCopilot() {
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Flame className="w-4 h-4 text-orange-400" />
-                <h3 className="text-sm font-semibold text-[#F5F7FA]">Recommended Surge Zones</h3>
+                <h3 className="text-sm font-semibold text-[#F5F7FA]">ML Demand Hotspots</h3>
               </div>
-              <span className="text-[11px] text-gray-400 font-mono">Live OSRM Matrix</span>
+              <span className="text-[10px] text-[#38BDF8] bg-[#38BDF8]/10 px-2 py-0.5 rounded font-mono font-bold">ML Predictive Surge</span>
             </div>
 
             {loadingBriefing ? (

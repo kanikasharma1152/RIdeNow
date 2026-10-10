@@ -3,9 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { getRide, cancelRide } from '../../services/rideService';
 import { processPayment } from '../../services/paymentService';
 import { submitRating, getRideRating } from '../../services/ratingService';
+import { useSocket } from '../../context/WebSocketContext';
 import Map from '../../components/Map';
+import ActiveRideSafetyPanel from '../../components/ActiveRideSafetyPanel';
 import { Car, MapPin, Navigation, Clock, User, Phone, Star, ShieldCheck, X, Check, Loader2, Sparkles, Activity } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { getErrorMessage } from '../../services/api';
+
 
 const STATUS_STEPS = ['REQUESTED', 'ACCEPTED', 'STARTED', 'COMPLETED'];
 
@@ -62,41 +66,168 @@ const RideDetails = () => {
   const [feedback, setFeedback] = useState('');
   const [existingRating, setExistingRating] = useState(null);
 
+  const { subscribe, connectionState } = useSocket();
+  const [driverLocation, setDriverLocation] = useState(null);
+  const [lastLocationTime, setLastLocationTime] = useState(null);
+
+  // Track whether the component is still mounted to ignore stale async results
+  const isMountedRef = useRef(true);
+  // Dedup guard: prevent showing the same error toast multiple times during polling/WS reconnect
+  const errorShownRef = useRef(false);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    errorShownRef.current = false;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [id]);
+
   const fetchExistingRating = async (rideId) => {
     try {
       const data = await getRideRating(rideId);
-      if (data) {
+      if (data && isMountedRef.current) {
         setExistingRating(data);
       }
     } catch {
-      // rating may not exist yet
+      // rating may not exist yet — silently ignore
     }
   };
 
   const fetchRide = async () => {
+    // Closure flag to detect if this specific call became stale
+    let cancelled = false;
+
     try {
       const data = await getRide(id);
+
+      // Ignore if component unmounted or this call was superseded
+      if (!isMountedRef.current || cancelled) return;
+
       setRide(data);
+      // Reset error dedup on successful fetch
+      errorShownRef.current = false;
+
+      if (data?.driver_info?.latitude && data?.driver_info?.longitude) {
+        setDriverLocation({
+          lat: data.driver_info.latitude,
+          lng: data.driver_info.longitude,
+          heading: 0,
+        });
+        if (data.driver_info.location_updated_at) {
+          setLastLocationTime(new Date(data.driver_info.location_updated_at).getTime());
+        }
+      }
       if (data && data.status === 'COMPLETED') {
         fetchExistingRating(data.id);
       }
     } catch (err) {
-      toast.error('Failed to fetch ride details.');
-      navigate('/rides');
+      if (!isMountedRef.current || cancelled) return;
+
+      const status = err?.response?.status;
+
+      if (status === 401) {
+        // The Axios interceptor in api.js already handles 401 (clears token, redirects to /login).
+        // Do nothing here to avoid double-handling or duplicate navigation.
+        return;
+      }
+
+      if (status === 404) {
+        // Ride does not exist — navigate cleanly without a scary red error.
+        // This is normal when a user browses to a stale or invalid ride URL.
+        navigate('/rides', { replace: true });
+        return;
+      }
+
+      if (status === 403) {
+        // User is not a participant in this ride — navigate away cleanly.
+        navigate('/rides', { replace: true });
+        return;
+      }
+
+      // For 5xx server errors or network failures, show an informative error ONCE.
+      // Do NOT repeat the toast on every polling cycle or WS-reconnect-triggered refetch.
+      if (!errorShownRef.current) {
+        errorShownRef.current = true;
+        if (!err?.response) {
+          toast.error('Network error — could not reach the server. Retrying…', { id: 'ride-fetch-err' });
+        } else {
+          toast.error(
+            err?.response?.data?.detail || 'Could not load ride details. Please try again.',
+            { id: 'ride-fetch-err' }
+          );
+        }
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current && !cancelled) {
+        setLoading(false);
+      }
     }
+
+    // Return a cancel function (not actually needed for setTimeout callers, but kept for clarity)
+    return () => { cancelled = true; };
   };
+
+  const rideStatusRef = useRef(null);
 
   useEffect(() => {
     fetchRide();
-    // Poll every 8s if ride is active
-    let interval;
-    if (ride && ['REQUESTED', 'ACCEPTED', 'STARTED'].includes(ride.status)) {
-      interval = setInterval(fetchRide, 8000);
-    }
+  }, [id]);
+
+  // Poll every 8s while ride is active — driven by ref to avoid stale closure loop
+  useEffect(() => {
+    rideStatusRef.current = ride?.status;
+  }, [ride?.status]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const s = rideStatusRef.current;
+      if (s && ['REQUESTED', 'ACCEPTED', 'STARTED'].includes(s)) {
+        fetchRide();
+      }
+    }, 8000);
     return () => clearInterval(interval);
-  }, [id, ride?.status]);
+  }, [id]);
+
+  // Subscribe to real-time driver telemetry updates
+  useEffect(() => {
+    const unsubscribe = subscribe((event) => {
+      if (event.type === 'WS_RECONNECTED') {
+        fetchRide();
+      }
+      if (
+        (event.type === 'DRIVER_LOCATION_UPDATE' || event.type === 'driver_location') &&
+        event
+      ) {
+        const lat = event.latitude ?? event.data?.latitude;
+        const lng = event.longitude ?? event.data?.longitude;
+        const driverId = event.driver_id ?? event.data?.driver_id;
+        if (lat !== undefined && lng !== undefined) {
+          if (!ride?.driver_id || driverId === ride.driver_id) {
+            setDriverLocation({
+              lat,
+              lng,
+              heading: event.heading ?? event.data?.heading ?? 0,
+            });
+            setLastLocationTime(event.timestamp ? new Date(event.timestamp).getTime() : Date.now());
+          }
+        }
+      }
+      if (event.type === 'ride_status_updated' && event.ride_id === Number(id)) {
+        fetchRide();
+      }
+      // Refresh on any lifecycle event for this ride
+      if (
+        ['RIDE_ACCEPTED', 'RIDE_STARTED', 'RIDE_COMPLETED', 'RIDE_CANCELLED', 'DRIVER_MATCHED', 'DRIVER_REASSIGNED'].includes(event.type) &&
+        event.ride_id === Number(id)
+      ) {
+        fetchRide();
+      }
+    });
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [subscribe, ride?.driver_id, id]);
 
   const handleCancel = async () => {
     if (!window.confirm('Are you sure you want to cancel this ride?')) return;
@@ -138,17 +269,28 @@ const RideDetails = () => {
     try {
       const result = await submitRating({
         ride_id: ride.id,
-        target_type: 'driver',
-        target_id: ride.driver_id,
         rating,
-        comment: feedback,
-        feedback
+        comment: feedback || undefined,
+        feedback: feedback || undefined,
       });
       toast.success('Thank you for rating your captain!');
       setExistingRating(result);
-      await fetchRide();
+      // Non-blocking reload — fetchRide handles its own errors internally
+      fetchRide();
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Failed to submit rating');
+      const status = err?.response?.status;
+      if (status === 400) {
+        // Duplicate rating or validation error — surface the exact backend message
+        const detail = err?.response?.data?.detail;
+        if (detail && detail.toLowerCase().includes('already been rated')) {
+          toast.error('You have already rated this ride.');
+          fetchRide(); // sync UI to show the existing rating
+        } else {
+          toast.error(detail || 'Rating could not be submitted. Please check your input.');
+        }
+      } else {
+        toast.error(getErrorMessage(err, 'Rating submission failed. Please try again.'));
+      }
     } finally {
       setRatingLoading(false);
     }
@@ -163,7 +305,32 @@ const RideDetails = () => {
 
   const markers = [];
   if (ride.pickup_latitude && ride.pickup_longitude) {
-    markers.push({ lat: ride.pickup_latitude, lng: ride.pickup_longitude, type: 'pickup', popup: `Pickup: ${ride.pickup_location}` });
+    markers.push({
+      id: 'pickup',
+      lat: ride.pickup_latitude,
+      lng: ride.pickup_longitude,
+      type: 'pickup',
+      popup: `Pickup: ${ride.pickup_location}`
+    });
+  }
+  if (ride.dropoff_latitude && ride.dropoff_longitude) {
+    markers.push({
+      id: 'dropoff',
+      lat: ride.dropoff_latitude,
+      lng: ride.dropoff_longitude,
+      type: 'dropoff',
+      popup: `Dropoff: ${ride.dropoff_location}`
+    });
+  }
+  if (driverLocation && ['ACCEPTED', 'STARTED'].includes(ride.status)) {
+    markers.push({
+      id: `driver-${ride.driver_id}`,
+      lat: driverLocation.lat,
+      lng: driverLocation.lng,
+      type: 'driver',
+      heading: driverLocation.heading || 0,
+      popup: `Captain #${ride.driver_id}`
+    });
   }
   
   const isCancelled = ride.status === 'CANCELLED';
@@ -247,10 +414,44 @@ const RideDetails = () => {
           </div>
         </div>
 
+        {/* Real-time Safety Guard Panel (Active Trips) */}
+        {['REQUESTED', 'ACCEPTED', 'STARTED'].includes(ride.status) && (
+          <ActiveRideSafetyPanel ride={ride} onStatusChange={fetchRide} />
+        )}
+
         {/* Assigned Driver Card */}
+
         {ride.driver_id && ride.status !== 'CANCELLED' && (
           <div className="card p-5 border border-[#1E293B] bg-[#0A0F14] rounded-2xl shadow-lg">
-            <h2 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-3">Assigned Fleet Captain</h2>
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Assigned Fleet Captain</h2>
+              {/* Location Freshness Indicator */}
+              {lastLocationTime ? (() => {
+                const diffSec = Math.floor((Date.now() - lastLocationTime) / 1000);
+                if (diffSec < 30) {
+                  return (
+                    <span className="flex items-center gap-1.5 text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      Live GPS
+                    </span>
+                  );
+                } else if (diffSec < 120) {
+                  return (
+                    <span className="flex items-center gap-1.5 text-[10px] font-mono text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                      {diffSec}s ago
+                    </span>
+                  );
+                } else {
+                  return (
+                    <span className="flex items-center gap-1.5 text-[10px] font-mono text-red-400 bg-red-500/10 px-2 py-0.5 rounded-full border border-red-500/20">
+                      <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+                      Telemetry Stale
+                    </span>
+                  );
+                }
+              })() : null}
+            </div>
             <div className="flex items-center gap-3.5">
               <div className="w-12 h-12 bg-[#38BDF8]/10 border border-[#38BDF8]/30 text-[#38BDF8] rounded-xl flex items-center justify-center shrink-0">
                 <User size={22} />
@@ -269,11 +470,20 @@ const RideDetails = () => {
             <div className="mt-4 p-3.5 bg-[#101820] border border-[#1E293B] rounded-xl flex items-center justify-between text-xs">
               <div>
                 <p className="text-[10px] text-gray-400 uppercase font-mono">Vehicle Unit</p>
-                <p className="font-semibold text-[#F5F7FA] mt-0.5">RideNow Sedan</p>
+                <p className="font-semibold text-[#F5F7FA] mt-0.5">
+                  {ride.driver_info?.vehicle_model || 'RideNow Sedan'}
+                  {ride.driver_info?.vehicle_number && (
+                    <span className="ml-2 font-mono text-[11px] text-gray-400 bg-bg-secondary px-1.5 py-0.5 rounded border border-border-default">
+                      {ride.driver_info.vehicle_number}
+                    </span>
+                  )}
+                </p>
               </div>
               <div className="text-right">
                 <p className="text-[10px] text-gray-400 uppercase font-mono">Class</p>
-                <span className="font-mono text-xs text-[#38BDF8] font-bold">Standard</span>
+                <span className="font-mono text-xs text-[#38BDF8] font-bold uppercase">
+                  {ride.driver_info?.vehicle_type || 'Standard'}
+                </span>
               </div>
             </div>
           </div>
@@ -372,7 +582,7 @@ const RideDetails = () => {
       
       {/* Right Column: Dark Map Telemetry */}
       <div className="lg:col-span-7 min-h-[380px] lg:min-h-[540px] lg:sticky lg:top-4 relative rounded-2xl overflow-hidden card p-1 border border-[#1E293B] self-start shadow-xl">
-        <Map markers={markers} />
+        <Map markers={markers} animateDrivers={true} />
       </div>
       
     </div>

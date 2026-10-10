@@ -38,7 +38,7 @@ import toast from 'react-hot-toast';
 
 const DriverDashboard = () => {
   const { user } = useAuth();
-  const { isConnected: isSocketConnected, subscribe } = useSocket();
+  const { isConnected: isSocketConnected, subscribe, send } = useSocket();
   const [profile, setProfile] = useState(null);
   const [briefing, setBriefing] = useState(null);
   const [activeRide, setActiveRide] = useState(null);
@@ -55,15 +55,20 @@ const DriverDashboard = () => {
       const p = await getMyDriverProfile();
       setProfile(p);
 
-      if (p.is_online) {
+      if (p?.is_online) {
         // Fetch copilot briefing for hotspot intelligence
         getDriverBriefing().then(b => setBriefing(b)).catch(() => {});
 
         // 1. Fetch assigned rides for this driver to find active ride
-        const myRidesResponse = await getDriverRides();
-        const myRides = Array.isArray(myRidesResponse)
-          ? myRidesResponse
-          : myRidesResponse.items || [];
+        let myRides = [];
+        try {
+          const myRidesResponse = await getDriverRides();
+          myRides = Array.isArray(myRidesResponse)
+            ? myRidesResponse
+            : myRidesResponse.items || [];
+        } catch (err) {
+          console.error('Failed to fetch assigned driver rides:', err);
+        }
         
         const currentActive = myRides.find((r) =>
           ['REQUESTED', 'ACCEPTED', 'STARTED'].includes(r.status)
@@ -72,8 +77,13 @@ const DriverDashboard = () => {
 
         // 2. If no active ride is currently underway, check unassigned requests
         if (!currentActive) {
-          const unassigned = await getAvailableRides();
-          setAvailableRides(Array.isArray(unassigned) ? unassigned : []);
+          try {
+            const unassigned = await getAvailableRides();
+            setAvailableRides(Array.isArray(unassigned) ? unassigned : []);
+          } catch (err) {
+            console.error('Failed to fetch unassigned available rides:', err);
+            setAvailableRides([]);
+          }
         } else {
           setAvailableRides([]);
         }
@@ -123,11 +133,57 @@ const DriverDashboard = () => {
   useEffect(() => {
     let locationInterval;
     if (profile?.is_online) {
-      locationInterval = setInterval(() => {
+      const pushLocation = () => {
+        if ('geolocation' in navigator) {
+          navigator.geolocation.getCurrentPosition(
+            async (pos) => {
+              const { latitude, longitude } = pos.coords;
+              setCurrentLocation({ lat: latitude, lng: longitude });
+              if (send) {
+                send({
+                  type: 'DRIVER_LOCATION',
+                  latitude,
+                  longitude,
+                });
+              }
+              try {
+                await updateDriverLocation(latitude, longitude);
+              } catch (err) {
+                console.error('Failed to update location', err);
+              }
+            },
+            (err) => console.error('Geolocation error:', err),
+            { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+          );
+        }
+      };
+
+      // Push location immediately upon going online
+      pushLocation();
+      locationInterval = setInterval(pushLocation, 15000);
+    }
+    return () => clearInterval(locationInterval);
+  }, [profile?.is_online, send]);
+
+  const toggleStatus = async () => {
+    setStatusLoading(true);
+    try {
+      const newOnline = !profile?.is_online;
+      const updated = await updateDriverStatus(newOnline, newOnline);
+      setProfile(updated);
+
+      if (newOnline && 'geolocation' in navigator) {
         navigator.geolocation.getCurrentPosition(
           async (pos) => {
             const { latitude, longitude } = pos.coords;
             setCurrentLocation({ lat: latitude, lng: longitude });
+            if (send) {
+              send({
+                type: 'DRIVER_LOCATION',
+                latitude,
+                longitude,
+              });
+            }
             try {
               await updateDriverLocation(latitude, longitude);
             } catch (err) {
@@ -137,20 +193,13 @@ const DriverDashboard = () => {
           (err) => console.error('Geolocation error:', err),
           { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
         );
-      }, 15000);
-    }
-    return () => clearInterval(locationInterval);
-  }, [profile?.is_online]);
+      }
 
-  const toggleStatus = async () => {
-    setStatusLoading(true);
-    try {
-      const newOnline = !profile.is_online;
-      await updateDriverStatus(newOnline, newOnline);
-      await fetchDashboardData();
+      await fetchDashboardData(true);
       toast.success(newOnline ? 'Captain Status: ONLINE' : 'Captain Status: OFFLINE');
     } catch (err) {
-      toast.error('Failed to update status');
+      console.error('Failed to toggle driver status:', err);
+      toast.error(err.response?.data?.detail || 'Failed to update status');
     } finally {
       setStatusLoading(false);
     }
@@ -224,14 +273,17 @@ const DriverDashboard = () => {
   const mapMarkers = [];
   if (currentLocation) {
     mapMarkers.push({
+      id: 'driver-self',
       lat: currentLocation.lat,
       lng: currentLocation.lng,
       type: 'driver',
+      heading: currentLocation.heading || 0,
       popup: 'Driver Position (You)',
     });
   }
   if (activeRide?.pickup_latitude && activeRide?.pickup_longitude) {
     mapMarkers.push({
+      id: 'active-pickup',
       lat: activeRide.pickup_latitude,
       lng: activeRide.pickup_longitude,
       type: 'pickup',
@@ -619,7 +671,7 @@ const DriverDashboard = () => {
         <div className="lg:col-span-4 space-y-6">
           {/* Dark Command Map */}
           <div className="card h-64 lg:h-72 p-1 relative overflow-hidden border border-[#1E293B] rounded-2xl bg-[#0A0F14] shadow-lg">
-            <Map markers={mapMarkers} />
+            <Map markers={mapMarkers} animateDrivers={true} />
           </div>
 
           {/* Surge Hotspots Widget */}

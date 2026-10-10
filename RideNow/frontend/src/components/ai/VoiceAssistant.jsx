@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Mic,
   MicOff,
@@ -8,131 +8,323 @@ import {
   Volume2,
   Sparkles,
   Radio,
+  Volume1,
 } from 'lucide-react';
 import { Room, RoomEvent, Track } from 'livekit-client';
 import { getVoiceToken } from '../../services/voiceService';
 import toast from 'react-hot-toast';
 
 export default function VoiceAssistant({ onClose }) {
-  // Voice states: 'idle' | 'connecting' | 'connected' | 'listening' | 'speaking' | 'unavailable' | 'error'
+  // Voice states: 'idle' | 'connecting' | 'listening' | 'speaking' | 'unavailable' | 'error'
   const [state, setState] = useState('idle');
   const [isMuted, setIsMuted] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [transcript, setTranscript] = useState('');
+  // audioBlocked: true when browser autoplay policy blocks audio output
+  const [audioBlocked, setAudioBlocked] = useState(false);
 
   const roomRef = useRef(null);
   const audioElementsRef = useRef(new Map());
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (roomRef.current) {
-        roomRef.current.disconnect();
-        roomRef.current = null;
+  // Monotonic session counter to guard callbacks against stale execution
+  const sessionIdRef = useRef(0);
+
+  // ─── Full cleanup of one Room instance ───────────────────────────────────
+  const cleanupRoom = useCallback(async (room, audioElements, sid) => {
+    if (!room) {
+      console.log(`[VOICE DEBUG] SESSION=${sid} CLEANUP_COMPLETE (no room instance)`);
+      return;
+    }
+
+    const roomStateBefore = room.state || 'unknown';
+    const localTracksBefore = room.localParticipant?.trackPublications?.size || 0;
+    const remoteTracksBefore = audioElements?.size || 0;
+
+    console.log(`[VOICE DEBUG] SESSION=${sid} ROOM_STATE_BEFORE=${roomStateBefore}`);
+    console.log(`[VOICE DEBUG] SESSION=${sid} LOCAL_TRACKS_BEFORE=${localTracksBefore}`);
+    console.log(`[VOICE DEBUG] SESSION=${sid} REMOTE_TRACKS_BEFORE=${remoteTracksBefore}`);
+
+    // Unpublish and stop all local tracks
+    if (room.localParticipant) {
+      try {
+        room.localParticipant.trackPublications.forEach((pub) => {
+          if (pub.track) {
+            try {
+              pub.track.stop();
+            } catch (_) {}
+          }
+        });
+      } catch (_) {}
+    }
+
+    // 1. Remove all listeners from this specific room instance
+    room.removeAllListeners();
+    console.log(`[VOICE DEBUG] SESSION=${sid} LISTENERS_CLEANED`);
+
+    // 2. Detach and remove every remote audio element attached for this session
+    if (audioElements) {
+      audioElements.forEach((el, trackSid) => {
+        try {
+          if (el && el.parentNode) el.parentNode.removeChild(el);
+          el.src = '';
+        } catch (_) {}
+      });
+      audioElements.clear();
+    }
+
+    // 3. Disconnect room with stopTracks=true
+    try {
+      if (room.state !== 'disconnected') {
+        await room.disconnect(true);
       }
-    };
+    } catch (e) {
+      console.warn('[VOICE] room.disconnect error:', e);
+    }
+
+    console.log(`[VOICE DEBUG] SESSION=${sid} ROOM_DISCONNECTED`);
+    console.log(`[VOICE DEBUG] SESSION=${sid} CLEANUP_COMPLETE`);
   }, []);
 
+  // ─── Component unmount: tear down whatever room is active ────────────────
+  useEffect(() => {
+    return () => {
+      const curSid = sessionIdRef.current;
+      const room = roomRef.current;
+      const audioEls = new Map(audioElementsRef.current);
+      roomRef.current = null;
+      audioElementsRef.current.clear();
+      cleanupRoom(room, audioEls, curSid);
+    };
+  }, [cleanupRoom]);
+
+  // ─── Resume audio after user taps "Tap to Enable Audio" button ───────────
+  const handleResumeAudio = useCallback(async () => {
+    if (!roomRef.current) return;
+    try {
+      await roomRef.current.startAudio();
+      setAudioBlocked(false);
+      toast.success('Audio playback enabled');
+      console.log(`[VOICE DEBUG] SESSION=${sessionIdRef.current} AUDIO_RESUMED via user gesture`);
+    } catch (e) {
+      console.warn('[VOICE] startAudio failed during resume:', e);
+    }
+  }, []);
+
+  // ─── CONNECT ─────────────────────────────────────────────────────────────
   const startVoiceSession = async () => {
+    const mySessionId = ++sessionIdRef.current;
+
+    console.log(`[VOICE DEBUG] SESSION=${mySessionId} CONNECT_START`);
     setState('connecting');
     setErrorMessage('');
+    setAudioBlocked(false);
+    setIsMuted(false);
     setTranscript('Initializing encrypted LiveKit WebRTC channel...');
 
+    // ── 0. Tear down any previous room FIRST ──────────────────────────────
+    const prevRoom = roomRef.current;
+    const prevAudioEls = new Map(audioElementsRef.current);
+    roomRef.current = null;
+    audioElementsRef.current.clear();
+    if (prevRoom) {
+      console.log(`[VOICE DEBUG] SESSION=${mySessionId - 1} DISCONNECT_START (auto-cleanup)`);
+      await cleanupRoom(prevRoom, prevAudioEls, mySessionId - 1);
+    }
+
+    // Guard if session changed during cleanup
+    if (sessionIdRef.current !== mySessionId) {
+      console.warn(`[VOICE DEBUG] SESSION=${mySessionId} Stale session — aborting after cleanup`);
+      return;
+    }
+
     try {
-      // 1. Request short-lived token from backend
+      // ── 1. Fetch fresh token ───────────────────────────────────────────
       const data = await getVoiceToken();
       if (!data || !data.token) {
         throw new Error('Invalid token response from voice service');
       }
-      console.log('[VOICE] token received');
+      console.log(`[VOICE DEBUG] SESSION=${mySessionId} TOKEN_RECEIVED room=${data.room}`);
 
-      // 2. Initialize LiveKit Room
+      if (sessionIdRef.current !== mySessionId) {
+        console.warn(`[VOICE DEBUG] SESSION=${mySessionId} Stale session — aborting after token fetch`);
+        return;
+      }
+
+      // ── 2. Create fresh Room instance ──────────────────────────────────
       const room = new Room({
         adaptiveStream: true,
         dynacast: true,
+        webAudioMix: false,
         audioCaptureDefaults: {
           autoGainControl: true,
           echoCancellation: true,
           noiseSuppression: true,
         },
       });
+      const myAudioEls = audioElementsRef.current;
       roomRef.current = room;
 
-      // 3. Setup event listeners
-      room.on(RoomEvent.Connected, () => {
-        console.log('[VOICE] connected');
+      console.log(`[VOICE DEBUG] SESSION=${mySessionId} ROOM_CREATED`);
+
+      // ── 3. Attach event listeners BEFORE connect() ─────────────────────
+      room.on(RoomEvent.Connected, async () => {
+        if (sessionIdRef.current !== mySessionId) return;
+
+        console.log(`[VOICE DEBUG] SESSION=${mySessionId} ROOM_CONNECTED`);
+        console.log(
+          `[VOICE] room.name=${room.name} room.state=${room.state} localParticipant.identity=${room.localParticipant?.identity} remote_participants=${room.remoteParticipants?.size || 0}`
+        );
+
         setState('listening');
         setTranscript('Connected to Nova AI Core. Listening for your command...');
         toast.success('LiveKit Voice Room Connected');
+
+        // Check if agent is already present in room
+        room.remoteParticipants.forEach((p) => {
+          console.log(
+            `[VOICE DEBUG] SESSION=${mySessionId} AGENT_CONNECTED identity=${p.identity} name=${p.name || 'Nova'}`
+          );
+        });
+
+        try {
+          await room.startAudio();
+          console.log(`[VOICE DEBUG] SESSION=${mySessionId} AUDIO_STARTED`);
+          const audioCtxState = room.canPlaybackAudio ? 'running' : 'suspended';
+          console.log(`[VOICE DEBUG] SESSION=${mySessionId} AUDIO_CONTEXT=${audioCtxState}`);
+        } catch (e) {
+          console.warn('[VOICE] startAudio() initially blocked:', e);
+        }
+      });
+
+      room.on(RoomEvent.AudioPlaybackStatusChanged, (canPlay) => {
+        if (sessionIdRef.current !== mySessionId) return;
+        console.log(`[VOICE DEBUG] SESSION=${mySessionId} AUDIO_PLAYBACK_STATUS canPlay=${canPlay}`);
+        setAudioBlocked(!canPlay);
       });
 
       room.on(RoomEvent.ParticipantConnected, (participant) => {
-        console.log('[VOICE] remote participant joined');
+        if (sessionIdRef.current !== mySessionId) return;
+        console.log(
+          `[VOICE DEBUG] SESSION=${mySessionId} AGENT_CONNECTED identity=${participant.identity} name=${participant.name || 'Nova'}`
+        );
       });
 
-      room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        if (track.kind === Track.Kind.Audio) {
-          console.log('[VOICE] remote audio track subscribed');
-          // Play remote audio (Agent Cartesia TTS)
-          const element = track.attach();
-          element.autoplay = true;
-          element.play().catch((playErr) => {
-            console.warn('[VOICE] Audio autoplay blocked or requires interaction:', playErr);
-          });
-          document.body.appendChild(element);
-          audioElementsRef.current.set(publication.trackSid, element);
-          console.log('[VOICE] remote audio attached');
-          setState('speaking');
+      room.on(RoomEvent.TrackSubscribed, async (track, publication, participant) => {
+        if (sessionIdRef.current !== mySessionId) return;
+        console.log(
+          `[VOICE DEBUG] SESSION=${mySessionId} TRACK_SUBSCRIBED kind=${track.kind} sid=${publication.trackSid} from=${participant.identity}`
+        );
+
+        if (track.kind !== Track.Kind.Audio) return;
+
+        const element = track.attach();
+        element.autoplay = true;
+        document.body.appendChild(element);
+        myAudioEls.set(publication.trackSid, element);
+
+        console.log(
+          `[VOICE DEBUG] SESSION=${mySessionId} AUDIO_ATTACHED muted=${element.muted} volume=${element.volume} sid=${publication.trackSid}`
+        );
+
+        try {
+          await element.play();
+          console.log(`[VOICE DEBUG] SESSION=${mySessionId} AUDIO_PLAY_RESULT=success`);
+        } catch (playErr) {
+          console.warn(`[VOICE DEBUG] SESSION=${mySessionId} AUDIO_PLAY_RESULT=blocked:`, playErr.message);
+          if (sessionIdRef.current === mySessionId) {
+            setAudioBlocked(true);
+          }
         }
+
+        setState('speaking');
       });
 
       room.on(RoomEvent.TrackUnsubscribed, (track, publication) => {
-        track.detach();
-        const el = audioElementsRef.current.get(publication.trackSid);
-        if (el && el.parentNode) {
-          el.parentNode.removeChild(el);
+        if (sessionIdRef.current !== mySessionId) return;
+        console.log(`[VOICE DEBUG] SESSION=${mySessionId} TRACK_UNSUBSCRIBED sid=${publication.trackSid}`);
+        const el = myAudioEls.get(publication.trackSid);
+        if (el) {
+          try {
+            track.detach(el);
+          } catch (_) {}
+          if (el.parentNode) el.parentNode.removeChild(el);
+          el.src = '';
+          myAudioEls.delete(publication.trackSid);
         }
-        audioElementsRef.current.delete(publication.trackSid);
         setState('listening');
       });
 
       room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        if (sessionIdRef.current !== mySessionId) return;
         if (speakers.length > 0) {
           const isAgent = speakers.some((s) => !s.isLocal);
-          if (isAgent) {
-            setState('speaking');
-          } else {
-            setState('listening');
-          }
+          setState(isAgent ? 'speaking' : 'listening');
         }
       });
 
       room.on(RoomEvent.Disconnected, () => {
-        console.log('[VOICE] disconnected');
+        console.log(
+          `[VOICE DEBUG] SESSION=${mySessionId} ROOM_DISCONNECTED_EVENT isStale=${sessionIdRef.current !== mySessionId}`
+        );
+        if (sessionIdRef.current !== mySessionId) return;
         setState('idle');
         setTranscript('');
+        setAudioBlocked(false);
       });
 
-      // 4. Connect to LiveKit Room
-      console.log('[VOICE] connecting to LiveKit');
+      // ── 4. Connect ────────────────────────────────────────────────────
       await room.connect(data.url, data.token);
 
-      // 5. Publish local microphone track
+      if (sessionIdRef.current !== mySessionId) {
+        console.warn(`[VOICE DEBUG] SESSION=${mySessionId} Stale session after connect — disconnecting`);
+        room.removeAllListeners();
+        room.disconnect(true);
+        return;
+      }
+
+      // ── 5. Verify microphone device and publish track ─────────────────
       try {
+        if (navigator?.mediaDevices?.getUserMedia) {
+          try {
+            const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const testTrack = testStream.getAudioTracks()[0];
+            if (testTrack) {
+              console.log(
+                `[VOICE DEBUG] SESSION=${mySessionId} MEDIA_STREAM_TRACK readyState=${testTrack.readyState} enabled=${testTrack.enabled} muted=${testTrack.muted}`
+              );
+              testTrack.stop();
+            }
+          } catch (gumErr) {
+            console.warn(`[VOICE DEBUG] SESSION=${mySessionId} getUserMedia probe warning:`, gumErr);
+          }
+        }
+
         await room.localParticipant.setMicrophoneEnabled(true);
-        console.log('[VOICE] microphone published');
+        console.log(`[VOICE DEBUG] SESSION=${mySessionId} MIC_ENABLED`);
+
+        const pubs = [...room.localParticipant.audioTrackPublications.values()];
+        console.log(`[VOICE DEBUG] SESSION=${mySessionId} MIC_PUBLICATIONS=${pubs.length}`);
+        pubs.forEach((pub) => {
+          console.log(`[VOICE] local mic publication sid=${pub.trackSid} muted=${pub.isMuted}`);
+        });
       } catch (micErr) {
-        console.warn('Microphone permission warning:', micErr);
+        console.warn(`[VOICE DEBUG] SESSION=${mySessionId} Microphone error:`, micErr);
         toast.error('Microphone permission required for voice');
         setErrorMessage('Microphone access denied or unavailable in this browser.');
         setState('error');
-        room.disconnect();
+        if (sessionIdRef.current === mySessionId) {
+          roomRef.current = null;
+          audioElementsRef.current.clear();
+        }
+        room.removeAllListeners();
+        room.disconnect(true);
         return;
       }
 
       setState('listening');
     } catch (err) {
-      console.error('LiveKit voice connection error:', err);
+      if (sessionIdRef.current !== mySessionId) return;
+      console.error(`[VOICE DEBUG] SESSION=${mySessionId} LiveKit error:`, err);
       if (err.response && err.response.status === 503) {
         setState('unavailable');
         setErrorMessage('Voice interface is not configured on this server.');
@@ -143,6 +335,7 @@ export default function VoiceAssistant({ onClose }) {
     }
   };
 
+  // ─── MUTE TOGGLE ─────────────────────────────────────────────────────────
   const toggleMute = async () => {
     if (!roomRef.current || !roomRef.current.localParticipant) return;
     const newMuteState = !isMuted;
@@ -151,16 +344,29 @@ export default function VoiceAssistant({ onClose }) {
     toast(newMuteState ? 'Microphone muted' : 'Microphone active');
   };
 
-  const endSession = () => {
-    if (roomRef.current) {
-      roomRef.current.disconnect();
-      roomRef.current = null;
-    }
+  // ─── DISCONNECT ───────────────────────────────────────────────────────────
+  const endSession = async () => {
+    const curSid = sessionIdRef.current;
+    console.log(`[VOICE DEBUG] SESSION=${curSid} DISCONNECT_START`);
+
+    sessionIdRef.current++;
+
+    const room = roomRef.current;
+    const audioEls = new Map(audioElementsRef.current);
+    roomRef.current = null;
+    audioElementsRef.current.clear();
+
     setState('idle');
     setTranscript('');
+    setAudioBlocked(false);
+    setIsMuted(false);
+
+    await cleanupRoom(room, audioEls, curSid);
+
     if (onClose) onClose();
   };
 
+  // ─── UI helpers ───────────────────────────────────────────────────────────
   const getPillBadgeClass = () => {
     if (state === 'listening' || state === 'speaking') {
       return 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30';
@@ -192,11 +398,22 @@ export default function VoiceAssistant({ onClose }) {
       {/* Live AI Status Pill */}
       <div className="inline-flex items-center gap-2 bg-[#101820] border border-[#1E293B] px-3.5 py-1 rounded-full text-xs font-mono text-gray-300">
         <Radio size={12} className={state === 'listening' || state === 'speaking' ? 'text-emerald-400 animate-pulse' : 'text-gray-500'} />
-        <span>CARTESIA + GROQ AI VOICE</span>
+        <span>AI VOICE</span>
         <span className={'text-[10px] px-2 py-0.5 rounded-full uppercase font-bold ' + getPillBadgeClass()}>
           {state === 'listening' ? 'ONLINE' : state === 'speaking' ? 'SPEAKING' : state.toUpperCase()}
         </span>
       </div>
+
+      {/* Audio blocked banner — shown when browser blocks autoplay */}
+      {audioBlocked && (state === 'listening' || state === 'speaking') && (
+        <button
+          onClick={handleResumeAudio}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-amber-400 text-xs font-semibold hover:bg-amber-500/20 transition"
+        >
+          <Volume1 size={15} />
+          Tap to Enable Audio Playback
+        </button>
+      )}
 
       {/* Visual Pulsing Voice Core */}
       <div className="relative flex items-center justify-center">
@@ -245,7 +462,7 @@ export default function VoiceAssistant({ onClose }) {
             ? 'Ask: "Where is my active ride?", "Calculate fare for 15 km", or "What is the cancellation policy?"'
             : state === 'unavailable' || state === 'error'
             ? errorMessage
-            : 'Stream real-time low-latency audio via Cartesia STT, Groq LLM, and Cartesia TTS directly into the platform.'}
+            : 'Stream real-time low-latency voice audio directly into the platform.'}
         </p>
       </div>
 
@@ -305,6 +522,7 @@ export default function VoiceAssistant({ onClose }) {
             onClick={() => {
               setState('idle');
               setTranscript('');
+              setAudioBlocked(false);
             }}
             className="btn btn-secondary px-6 py-2.5 text-xs font-semibold rounded-full"
           >

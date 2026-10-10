@@ -1,43 +1,59 @@
+import { useState, lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { WebSocketProvider } from './context/WebSocketContext';
+import OpeningAnimation from './components/OpeningAnimation';
+import ErrorBoundary from './components/ErrorBoundary';
 
 // Layouts
 import AuthLayout from './layouts/AuthLayout';
 import DashboardLayout from './layouts/DashboardLayout';
 
-// Auth pages
+// Auth pages (eager for instant first paint)
 import Login from './pages/Login';
 import Register from './pages/Register';
 
-// Shared pages
-import Profile from './pages/Profile';
-import Notifications from './pages/Notifications';
-import AIAssistantPage from './pages/shared/AIAssistantPage';
+// Shared pages (code-split)
+const Profile = lazy(() => import('./pages/Profile'));
+const Notifications = lazy(() => import('./pages/Notifications'));
+const AIAssistantPage = lazy(() => import('./pages/shared/AIAssistantPage'));
 
-// Passenger pages
-import PassengerDashboard from './pages/passenger/PassengerDashboard';
-import BookRide from './pages/passenger/BookRide';
-import RideHistory from './pages/passenger/RideHistory';
-import RideDetails from './pages/passenger/RideDetails';
-import Payments from './pages/passenger/Payments';
+// Passenger pages (code-split)
+const PassengerDashboard = lazy(() => import('./pages/passenger/PassengerDashboard'));
+const BookRide = lazy(() => import('./pages/passenger/BookRide'));
+const RideHistory = lazy(() => import('./pages/passenger/RideHistory'));
+const RideDetails = lazy(() => import('./pages/passenger/RideDetails'));
+const Payments = lazy(() => import('./pages/passenger/Payments'));
+const SafetyCenter = lazy(() => import('./pages/passenger/SafetyCenter'));
+const SharedRideTracking = lazy(() => import('./pages/shared/SharedRideTracking'));
 
-// Driver pages
-import DriverDashboard from './pages/driver/DriverDashboard';
-import DriverRides from './pages/driver/DriverRides';
-import DriverRideDetails from './pages/driver/DriverRideDetails';
-import DriverEarnings from './pages/driver/DriverEarnings';
-import DriverCopilot from './pages/driver/DriverCopilot';
+// Driver pages (code-split)
+const DriverDashboard = lazy(() => import('./pages/driver/DriverDashboard'));
+const DriverRides = lazy(() => import('./pages/driver/DriverRides'));
+const DriverRideDetails = lazy(() => import('./pages/driver/DriverRideDetails'));
+const DriverEarnings = lazy(() => import('./pages/driver/DriverEarnings'));
+const DriverCopilot = lazy(() => import('./pages/driver/DriverCopilot'));
 
-// Admin pages
-import AdminDashboard from './pages/admin/AdminDashboard';
+// Admin pages (code-split)
+const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard'));
+
+// Command-center themed route fallback loader
+const PageLoader = () => (
+  <div className="flex h-[50vh] w-full items-center justify-center">
+    <div className="flex flex-col items-center gap-3">
+      <div className="w-8 h-8 rounded-full border-2 border-[#38BDF8] border-t-transparent animate-spin" />
+      <span className="text-xs font-mono text-gray-500 uppercase tracking-widest">Loading Telemetry...</span>
+    </div>
+  </div>
+);
 
 // Helper to redirect to correct dashboard based on role
 const getHomeRouteForRole = (role) => {
   if (role === 'admin') return '/admin/dashboard';
   if (role === 'driver') return '/driver/dashboard';
   return '/dashboard';
+
 };
 
 // Route Guards
@@ -63,8 +79,24 @@ const AuthRoute = ({ children }) => {
 };
 
 function App() {
+  const [animationComplete, setAnimationComplete] = useState(false);
+
   return (
-    <BrowserRouter>
+    <>
+      {/* Opening cinematic animation — plays once, skippable */}
+      {!animationComplete && (
+        <OpeningAnimation onComplete={() => setAnimationComplete(true)} />
+      )}
+
+      {/* Main application (rendered behind animation, becomes visible after) */}
+      <div
+        style={{
+          opacity: animationComplete ? 1 : 0,
+          transition: 'opacity 0.5s ease-out',
+        }}
+      >
+        <ErrorBoundary>
+          <BrowserRouter>
       <AuthProvider>
         <Toaster
           position="top-center"
@@ -98,54 +130,63 @@ function App() {
         />
 
         <WebSocketProvider>
-          <Routes>
-            {/* Auth Routes */}
-            <Route element={<AuthRoute><AuthLayout /></AuthRoute>}>
-              <Route path="/login" element={<Login />} />
-              <Route path="/register" element={<Register />} />
-            </Route>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              {/* Auth Routes */}
+              <Route element={<AuthRoute><AuthLayout /></AuthRoute>}>
+                <Route path="/login" element={<Login />} />
+                <Route path="/register" element={<Register />} />
+              </Route>
 
-            {/* Passenger Routes */}
-            <Route element={<ProtectedRoute allowedRole="passenger"><DashboardLayout /></ProtectedRoute>}>
-              <Route path="/dashboard" element={<PassengerDashboard />} />
-              <Route path="/book-ride" element={<BookRide />} />
-              <Route path="/rides" element={<RideHistory />} />
-              <Route path="/rides/:id" element={<RideDetails />} />
-              <Route path="/payments" element={<Payments />} />
-              <Route path="/assistant" element={<AIAssistantPage />} />
-              <Route path="/notifications" element={<Notifications />} />
-              <Route path="/profile" element={<Profile />} />
-            </Route>
+              {/* Passenger Routes */}
+              <Route element={<ProtectedRoute allowedRole="passenger"><DashboardLayout /></ProtectedRoute>}>
+                <Route path="/dashboard" element={<PassengerDashboard />} />
+                <Route path="/book-ride" element={<BookRide />} />
+                <Route path="/rides" element={<RideHistory />} />
+                <Route path="/rides/:id" element={<RideDetails />} />
+                <Route path="/payments" element={<Payments />} />
+                <Route path="/safety" element={<SafetyCenter />} />
+                <Route path="/assistant" element={<AIAssistantPage />} />
+                <Route path="/notifications" element={<Notifications />} />
+                <Route path="/profile" element={<Profile />} />
+              </Route>
 
-            {/* Driver Routes */}
-            <Route element={<ProtectedRoute allowedRole="driver"><DashboardLayout /></ProtectedRoute>}>
-              <Route path="/driver/dashboard" element={<DriverDashboard />} />
-              <Route path="/driver/rides" element={<DriverRides />} />
-              <Route path="/driver/rides/:id" element={<DriverRideDetails />} />
-              <Route path="/driver/earnings" element={<DriverEarnings />} />
-              <Route path="/driver/copilot" element={<DriverCopilot />} />
-              <Route path="/driver/assistant" element={<AIAssistantPage />} />
-              <Route path="/driver/notifications" element={<Notifications />} />
-              <Route path="/driver/profile" element={<Profile />} />
-            </Route>
+              {/* Driver Routes */}
+              <Route element={<ProtectedRoute allowedRole="driver"><DashboardLayout /></ProtectedRoute>}>
+                <Route path="/driver/dashboard" element={<DriverDashboard />} />
+                <Route path="/driver/rides" element={<DriverRides />} />
+                <Route path="/driver/rides/:id" element={<DriverRideDetails />} />
+                <Route path="/driver/earnings" element={<DriverEarnings />} />
+                <Route path="/driver/copilot" element={<DriverCopilot />} />
+                <Route path="/driver/assistant" element={<AIAssistantPage />} />
+                <Route path="/driver/notifications" element={<Notifications />} />
+                <Route path="/driver/profile" element={<Profile />} />
+              </Route>
 
-            {/* Admin Routes */}
-            <Route element={<ProtectedRoute allowedRole="admin"><DashboardLayout /></ProtectedRoute>}>
-              <Route path="/admin/dashboard" element={<AdminDashboard />} />
-              <Route path="/admin/assistant" element={<AIAssistantPage />} />
-              <Route path="/admin/notifications" element={<Notifications />} />
-              <Route path="/admin/profile" element={<Profile />} />
-            </Route>
+              {/* Admin Routes */}
+              <Route element={<ProtectedRoute allowedRole="admin"><DashboardLayout /></ProtectedRoute>}>
+                <Route path="/admin/dashboard" element={<AdminDashboard />} />
+                <Route path="/admin/assistant" element={<AIAssistantPage />} />
+                <Route path="/admin/notifications" element={<Notifications />} />
+                <Route path="/admin/profile" element={<Profile />} />
+              </Route>
 
-            {/* Redirect root → login */}
-            <Route path="/" element={<Navigate to="/login" replace />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+              {/* Public Live Trip Tracking (No Auth Required) */}
+              <Route path="/safety/share/:token" element={<SharedRideTracking />} />
+
+              {/* Redirect root → login */}
+              <Route path="/" element={<Navigate to="/login" replace />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
         </WebSocketProvider>
+
       </AuthProvider>
     </BrowserRouter>
+        </ErrorBoundary>
+      </div>
+    </>
   );
 }
 
 export default App;
-

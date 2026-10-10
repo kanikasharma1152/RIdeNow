@@ -7,6 +7,7 @@ const WebSocketContext = createContext(null);
 export const WebSocketProvider = ({ children }) => {
   const { user } = useAuth();
   const [isConnected, setIsConnected] = useState(false);
+  const [connectionState, setConnectionState] = useState('DISCONNECTED');
   const [lastEvent, setLastEvent] = useState(null);
   const socketRef = useRef(null);
   const listenersRef = useRef(new Set());
@@ -34,10 +35,19 @@ export const WebSocketProvider = ({ children }) => {
       return;
     }
 
-    const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
-    const wsProto = apiBase.startsWith('https') ? 'wss' : 'ws';
-    const host = apiBase.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    const url = `${wsProto}://${host}/ws?token=${encodeURIComponent(token)}`;
+    setConnectionState((prev) => (prev === 'DISCONNECTED' ? 'CONNECTING' : 'RECONNECTING'));
+
+    let url;
+    if (import.meta.env.VITE_WS_URL) {
+      const wsBase = import.meta.env.VITE_WS_URL.replace(/\/$/, '');
+      const separator = wsBase.includes('?') ? '&' : '?';
+      url = `${wsBase}${separator}token=${encodeURIComponent(token)}`;
+    } else {
+      const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
+      const wsProto = apiBase.startsWith('https') ? 'wss' : 'ws';
+      const host = apiBase.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      url = `${wsProto}://${host}/ws?token=${encodeURIComponent(token)}`;
+    }
 
     try {
       const ws = new WebSocket(url);
@@ -45,7 +55,20 @@ export const WebSocketProvider = ({ children }) => {
 
       ws.onopen = () => {
         setIsConnected(true);
+        setConnectionState('CONNECTED');
+
+        const wasReconnect = retryCountRef.current > 0;
         retryCountRef.current = 0;
+
+        if (wasReconnect) {
+          listenersRef.current.forEach((fn) => {
+            try {
+              fn({ type: 'WS_RECONNECTED', timestamp: Date.now() });
+            } catch {
+              // Isolated
+            }
+          });
+        }
 
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         pingIntervalRef.current = setInterval(() => {
@@ -119,12 +142,14 @@ export const WebSocketProvider = ({ children }) => {
 
       ws.onclose = (event) => {
         setIsConnected(false);
+        setConnectionState('DISCONNECTED');
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
 
         if (event.code === 1008) return;
 
         const backoff = Math.min(1000 * Math.pow(1.5, retryCountRef.current), 15000);
         retryCountRef.current += 1;
+        setConnectionState('RECONNECTING');
         reconnectTimeoutRef.current = setTimeout(() => {
           connect();
         }, backoff);
@@ -147,6 +172,7 @@ export const WebSocketProvider = ({ children }) => {
     }
     processedEventsRef.current.clear();
     setIsConnected(false);
+    setConnectionState('DISCONNECTED');
   }, []);
 
   const send = useCallback((payload) => {
@@ -171,7 +197,7 @@ export const WebSocketProvider = ({ children }) => {
   }, [user, connect, disconnect]);
 
   return (
-    <WebSocketContext.Provider value={{ isConnected, lastEvent, subscribe, send }}>
+    <WebSocketContext.Provider value={{ isConnected, connectionState, lastEvent, subscribe, send }}>
       {children}
     </WebSocketContext.Provider>
   );

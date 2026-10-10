@@ -28,11 +28,18 @@ export const useWebSocket = (onMessage) => {
     const token = localStorage.getItem('token');
     if (!token) return null;
 
+    if (import.meta.env.VITE_WS_URL) {
+      const wsBase = import.meta.env.VITE_WS_URL.replace(/\/$/, '');
+      const separator = wsBase.includes('?') ? '&' : '?';
+      return `${wsBase}${separator}token=${encodeURIComponent(token)}`;
+    }
+
     const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
     const wsProto = apiBase.startsWith('https') ? 'wss' : 'ws';
     const host = apiBase.replace(/^https?:\/\//, '').replace(/\/$/, '');
     return `${wsProto}://${host}/ws?token=${encodeURIComponent(token)}`;
   }, []);
+
 
   const connect = useCallback(() => {
     const url = getWsUrl();

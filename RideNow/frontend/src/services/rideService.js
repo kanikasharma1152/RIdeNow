@@ -67,3 +67,15 @@ export const getRide = async (rideId) => {
   const response = await api.get(`/rides/${rideId}`);
   return response.data;
 };
+
+/**
+ * Get fare estimate before booking — no ride is created.
+ * Returns { distance_km, estimated_fare, base_fare, per_km_rate, currency,
+ *           pickup_latitude, pickup_longitude, dropoff_latitude, dropoff_longitude }
+ */
+export const getFareEstimate = async (pickup_location, dropoff_location) => {
+  const response = await api.get('/rides/fare-estimate', {
+    params: { pickup_location, dropoff_location },
+  });
+  return response.data;
+};
