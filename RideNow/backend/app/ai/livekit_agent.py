@@ -46,7 +46,7 @@ from app.ai.tools.registry import (
 from app.ai.rag.retriever import retrieve_relevant_knowledge, format_knowledge_context
 
 # LiveKit & Plugin imports
-from livekit.agents import JobContext, WorkerOptions, cli, llm, JobProcess
+from livekit.agents import JobContext, WorkerOptions, JobExecutorType, cli, llm, JobProcess
 from livekit.agents.voice import AgentSession, Agent
 from livekit.plugins import cartesia, groq, silero
 
@@ -537,8 +537,9 @@ def main():
             api_key=settings.LIVEKIT_API_KEY,
             api_secret=settings.LIVEKIT_API_SECRET,
             agent_name="",
+            job_executor_type=JobExecutorType.THREAD,
             num_idle_processes=0,
-            load_threshold=1.0,
+            load_threshold=10.0,
         )
     )
 

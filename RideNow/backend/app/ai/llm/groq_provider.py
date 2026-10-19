@@ -87,7 +87,7 @@ class GroqProvider(BaseLLMProvider):
                 kwargs["tools"] = formatted_tools
                 kwargs["tool_choice"] = "auto"
 
-        FALLBACK_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        FALLBACK_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
         models_to_try = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
 
         import asyncio
