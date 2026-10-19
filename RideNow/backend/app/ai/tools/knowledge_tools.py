@@ -6,7 +6,6 @@ FAQs, safety protocols, and driver guides via RAG.
 """
 
 from typing import Dict, Any
-from app.ai.rag.retriever import retrieve_relevant_knowledge, format_knowledge_context
 
 
 async def search_policies_and_faq_tool(query: str, **kwargs) -> Dict[str, Any]:
@@ -17,6 +16,8 @@ async def search_policies_and_faq_tool(query: str, **kwargs) -> Dict[str, Any]:
     Args:
         query: Specific question or search phrase.
     """
+    from app.ai.rag.retriever import retrieve_relevant_knowledge, format_knowledge_context
+
     snippets = retrieve_relevant_knowledge(query, top_k=3)
     if not snippets:
         return {

@@ -511,10 +511,18 @@ async def entrypoint(ctx: JobContext):
     def on_state_changed(evt) -> None:
         logger.info(f"[VOICE AGENT] state: {evt.old_state} -> {evt.new_state}")
 
+    @session.on("user_state_changed")
+    def on_user_state_changed(evt) -> None:
+        logger.info(f"[VOICE AGENT] user state: {getattr(evt, 'old_state', '?')} -> {getattr(evt, 'new_state', '?')}")
+
     @session.on("user_input_transcribed")
     def on_transcript(evt) -> None:
         if evt.is_final:
             logger.info(f"[VOICE AGENT] user said: {evt.transcript!r}")
+
+    @session.on("error")
+    def on_session_error(evt) -> None:
+        logger.error(f"[VOICE AGENT] session error: {evt}")
 
     # Start the session by connecting it to the LiveKit room with the agent instance
     logger.info(f"[VOICE AGENT] AgentSession starting in room: {ctx.room.name}")
@@ -524,6 +532,15 @@ async def entrypoint(ctx: JobContext):
     except Exception as e:
         logger.error(f"[VOICE AGENT] session.start failed: {e}", exc_info=True)
         return
+
+    # Wait for room_io to complete track publication and handshake with remote participant
+    if session.room_io:
+        try:
+            logger.info("[VOICE AGENT] Waiting for room_io audio tracks to be ready...")
+            await asyncio.wait_for(session.room_io.wait_for_ready(), timeout=5.0)
+            logger.info("[VOICE AGENT] room_io ready — audio tracks published to room")
+        except Exception as e:
+            logger.warning(f"[VOICE AGENT] room_io.wait_for_ready notice (proceeding): {e}")
 
     # Build greeting text for this user's role
     first_name = current_user.name.split()[0]
@@ -536,15 +553,19 @@ async def entrypoint(ctx: JobContext):
     # Trigger initial spoken greeting
     logger.info(f"[VOICE AGENT] greeting started for {first_name} (role={current_user.role})")
     try:
-        await session.say(greeting_text)
+        speech = session.say(greeting_text)
+        await asyncio.wait_for(speech, timeout=8.0)
         logger.info("[VOICE AGENT] greeting completed — agent listening for user audio")
     except Exception as e:
-        logger.warning(f"[VOICE AGENT] session.say greeting error: {e}, trying generate_reply fallback", exc_info=True)
+        logger.warning(f"[VOICE AGENT] session.say greeting note: {e}, trying generate_reply fallback", exc_info=True)
         try:
-            await session.generate_reply(instructions=f"Greet {first_name} warmly in one short sentence as Nova Voice Copilot.")
+            reply = session.generate_reply(instructions=f"Greet {first_name} warmly in one short sentence as Nova Voice Copilot.")
+            if asyncio.iscoroutine(reply):
+                await asyncio.wait_for(reply, timeout=8.0)
             logger.info("[VOICE AGENT] generate_reply fallback completed")
         except Exception as e2:
             logger.error(f"[VOICE AGENT] generate_reply fallback also failed: {e2}")
+
     # AgentSession runs its own background tasks (audio forwarding, VAD, LLM loop).
     # Wait until the session closes (e.g. participant disconnects) or shutdown is called.
     close_event = asyncio.Event()

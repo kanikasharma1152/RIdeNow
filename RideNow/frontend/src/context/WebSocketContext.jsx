@@ -75,7 +75,7 @@ export const WebSocketProvider = ({ children }) => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'PING', timestamp: Date.now() }));
           }
-        }, 30000);
+        }, 20000);
       };
 
       ws.onmessage = (event) => {
