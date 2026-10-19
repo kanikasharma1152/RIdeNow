@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import Optional
 from urllib.parse import unquote
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine.url import make_url
 
@@ -56,6 +57,13 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "groq"
     GROQ_MODEL: str = "openai/gpt-oss-20b"       # Ultra-fast 48ms inference with native tool calling
     GROQ_API_KEY: Optional[str] = None
+
+    @field_validator("GROQ_MODEL", mode="before")
+    @classmethod
+    def sanitize_groq_model(cls, v: Optional[str]) -> str:
+        if not v or v not in {"openai/gpt-oss-20b", "qwen/qwen3.8-27b"}:
+            return "openai/gpt-oss-20b"
+        return v
     GROQ_TIMEOUT_SECONDS: float = 30.0          # Hard timeout for LLM inference (Phase 14)
     LLM_TEMPERATURE: float = 0.2                # Low temp for factual tool responses
     LLM_MAX_TOKENS: int = 1024
