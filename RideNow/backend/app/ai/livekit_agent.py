@@ -16,6 +16,22 @@ import os
 import sys
 from typing import Dict, Any, List
 
+# Strict resource limits for memory-constrained container environments (Render 512MB limit)
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+try:
+    import torch
+    torch.set_num_threads(1)
+    if hasattr(torch, "set_num_interop_threads"):
+        torch.set_num_interop_threads(1)
+except Exception:
+    pass
+
 from dotenv import load_dotenv
 
 # Ensure backend root is in sys.path and load environment
@@ -53,14 +69,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("ridenow-voice-agent")
 
 
+_cached_vad = None
+
+
 def prewarm(proc: JobProcess) -> None:
     """Pre-load the Silero VAD model so the first user speech has no event-loop blocking delay."""
+    global _cached_vad
     logger.info("[VOICE AGENT] prewarm: loading Silero VAD model")
-    proc.userdata["vad"] = silero.VAD.load(
-        min_speech_duration=0.1,
-        min_silence_duration=0.5,
-    )
-    logger.info("[VOICE AGENT] prewarm: Silero VAD model loaded")
+    try:
+        vad = silero.VAD.load(
+            min_speech_duration=0.1,
+            min_silence_duration=0.5,
+            force_cpu=True,
+        )
+        proc.userdata["vad"] = vad
+        _cached_vad = vad
+        logger.info("[VOICE AGENT] prewarm: Silero VAD model loaded successfully")
+    except Exception as e:
+        logger.warning(f"[VOICE AGENT] prewarm VAD loading error: {e}")
 
 
 def create_voice_tools(current_user: User) -> List[Any]:
@@ -438,11 +464,18 @@ async def entrypoint(ctx: JobContext):
         language="en",
     )
 
-    # Silero VAD — use prewarmed instance from prewarm_fnc if available (avoids 1-2 s event-loop block)
-    vad_plugin = ctx.proc.userdata.get("vad") or silero.VAD.load(
-        min_speech_duration=0.1,
-        min_silence_duration=0.5,
-    )
+    # Silero VAD — reuse prewarmed instance to prevent duplicate loading & memory spikes
+    vad_plugin = ctx.proc.userdata.get("vad") or _cached_vad
+    if vad_plugin is None:
+        try:
+            vad_plugin = silero.VAD.load(
+                min_speech_duration=0.1,
+                min_silence_duration=0.5,
+                force_cpu=True,
+            )
+            _cached_vad = vad_plugin
+        except Exception as e:
+            logger.error(f"[VOICE AGENT] Failed to initialize Silero VAD: {e}")
 
     # Groq LLM (openai/gpt-oss-120b for low-latency reasoning via Groq)
     llm_plugin = groq.LLM(
@@ -483,10 +516,14 @@ async def entrypoint(ctx: JobContext):
         if evt.is_final:
             logger.info(f"[VOICE AGENT] user said: {evt.transcript!r}")
 
-    # FIXED: session.start() is a coroutine — MUST be awaited
-    logger.info("[VOICE AGENT] AgentSession starting")
-    await session.start(agent, room=ctx.room)
-    logger.info("[VOICE AGENT] AgentSession started")
+    # Start the session by connecting it to the LiveKit room with the agent instance
+    logger.info(f"[VOICE AGENT] AgentSession starting in room: {ctx.room.name}")
+    try:
+        await session.start(room=ctx.room, agent=agent)
+        logger.info("[VOICE AGENT] AgentSession started successfully")
+    except Exception as e:
+        logger.error(f"[VOICE AGENT] session.start failed: {e}", exc_info=True)
+        return
 
     # Build greeting text for this user's role
     first_name = current_user.name.split()[0]
@@ -496,13 +533,18 @@ async def entrypoint(ctx: JobContext):
         else f"Hello Commander {first_name}. Driver Voice Copilot is active. What can I check for you?"
     )
 
-    # Awaiting session.say generates initial voice greeting
+    # Trigger initial spoken greeting
     logger.info(f"[VOICE AGENT] greeting started for {first_name} (role={current_user.role})")
     try:
         await session.say(greeting_text)
         logger.info("[VOICE AGENT] greeting completed — agent listening for user audio")
     except Exception as e:
-        logger.error(f"[VOICE AGENT] greeting playback error (continuing session): {e}", exc_info=True)
+        logger.warning(f"[VOICE AGENT] session.say greeting error: {e}, trying generate_reply fallback", exc_info=True)
+        try:
+            await session.generate_reply(instructions=f"Greet {first_name} warmly in one short sentence as Nova Voice Copilot.")
+            logger.info("[VOICE AGENT] generate_reply fallback completed")
+        except Exception as e2:
+            logger.error(f"[VOICE AGENT] generate_reply fallback also failed: {e2}")
     # AgentSession runs its own background tasks (audio forwarding, VAD, LLM loop).
     # Wait until the session closes (e.g. participant disconnects) or shutdown is called.
     close_event = asyncio.Event()

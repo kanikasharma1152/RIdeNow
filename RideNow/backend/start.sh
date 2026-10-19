@@ -9,6 +9,14 @@ echo "============================================================"
 echo "  RIDENOW BACKEND — STARTING"
 echo "============================================================"
 
+# Limit C/C++ matrix library threads to 1 (prevents multi-core memory over-allocation on 512MB RAM)
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
+
 # ── Start LiveKit Voice Agent Worker (background) ────────────────────────
 if [ -n "$LIVEKIT_URL" ] && [ -n "$LIVEKIT_API_KEY" ] && [ -n "$LIVEKIT_API_SECRET" ]; then
   echo "  [VOICE] LiveKit credentials found — starting voice agent worker..."
