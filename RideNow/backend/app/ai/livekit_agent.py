@@ -537,6 +537,8 @@ def main():
             api_key=settings.LIVEKIT_API_KEY,
             api_secret=settings.LIVEKIT_API_SECRET,
             agent_name="",
+            num_idle_processes=0,
+            load_threshold=1.0,
         )
     )
 

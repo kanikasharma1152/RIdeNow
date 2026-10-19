@@ -13,7 +13,7 @@ bind = f"0.0.0.0:{os.getenv('PORT', '8000')}"
 worker_class = "uvicorn.workers.UvicornWorker"
 
 # Rule of thumb for I/O-bound ASGI apps: 2 × CPU cores + 1
-workers = int(os.getenv("WEB_CONCURRENCY", "2"))
+workers = int(os.getenv("WEB_CONCURRENCY", "1"))
 
 # ── Timeouts ──────────────────────────────────────────────────────────────────
 timeout = int(os.getenv("GUNICORN_TIMEOUT", "120"))      # worker silent timeout (s)
