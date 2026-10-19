@@ -54,7 +54,7 @@ class Settings(BaseSettings):
 
     # ── LLM Provider (Primary: Groq) ──────────────────────────────
     LLM_PROVIDER: str = "groq"
-    GROQ_MODEL: str = "openai/gpt-oss-120b"     # High-speed inference with native tool calling
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"  # High-speed inference with native tool calling
     GROQ_API_KEY: Optional[str] = None
     GROQ_TIMEOUT_SECONDS: float = 30.0          # Hard timeout for LLM inference (Phase 14)
     LLM_TEMPERATURE: float = 0.2                # Low temp for factual tool responses
