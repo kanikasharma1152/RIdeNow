@@ -61,8 +61,9 @@ from app.ai.tools.registry import (
 )
 
 # LiveKit & Plugin imports
-from livekit.agents import JobContext, WorkerOptions, JobExecutorType, cli, llm, JobProcess
+from livekit.agents import JobContext, WorkerOptions, JobExecutorType, cli, llm, JobProcess, utils
 from livekit.agents.voice import AgentSession, Agent
+from livekit.agents.voice.turn import TurnHandlingOptions
 from livekit.plugins import cartesia, groq, silero
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -457,128 +458,131 @@ async def entrypoint(ctx: JobContext):
     cartesia_key = settings.CARTESIA_API_KEY
     groq_key = settings.GROQ_API_KEY
 
-    # Cartesia STT (speech-to-text) with multilingual streaming
-    stt_plugin = cartesia.STT(
-        api_key=cartesia_key,
-        model=settings.CARTESIA_STT_MODEL,
-        language="en",
-    )
+    async with utils.http_context.open():
+        # Cartesia STT (speech-to-text) with multilingual streaming
+        stt_plugin = cartesia.STT(
+            api_key=cartesia_key,
+            model=settings.CARTESIA_STT_MODEL,
+            language="en",
+        )
 
-    # Silero VAD — reuse prewarmed instance to prevent duplicate loading & memory spikes
-    vad_plugin = ctx.proc.userdata.get("vad") or _cached_vad
-    if vad_plugin is None:
+        # Silero VAD — reuse prewarmed instance to prevent duplicate loading & memory spikes
+        vad_plugin = ctx.proc.userdata.get("vad") or _cached_vad
+        if vad_plugin is None:
+            try:
+                vad_plugin = silero.VAD.load(
+                    min_speech_duration=0.1,
+                    min_silence_duration=0.5,
+                    force_cpu=True,
+                )
+                _cached_vad = vad_plugin
+            except Exception as e:
+                logger.error(f"[VOICE AGENT] Failed to initialize Silero VAD: {e}")
+
+        # Groq LLM (openai/gpt-oss-120b for low-latency reasoning via Groq)
+        llm_plugin = groq.LLM(
+            model=settings.GROQ_MODEL,
+            api_key=groq_key,
+            temperature=0.2,
+        )
+
+        # Cartesia TTS (ultra-natural low-latency voice generation)
+        tts_plugin = cartesia.TTS(
+            api_key=cartesia_key,
+            voice=settings.CARTESIA_VOICE_ID,
+            model=settings.CARTESIA_MODEL,
+            sample_rate=24000,
+        )
+
+        # Create AgentSession with explicit VAD turn detection (avoids heavy local EOT neural net)
+        session = AgentSession(
+            stt=stt_plugin,
+            vad=vad_plugin,
+            llm=llm_plugin,
+            tts=tts_plugin,
+            turn_handling=TurnHandlingOptions(turn_detection="vad"),
+        )
+
+        # Create Voice Agent with tools and instructions
+        agent = Agent(
+            instructions=voice_system_prompt,
+            tools=voice_tools,
+        )
+
+        # Register event handlers for structured log output
+        @session.on("agent_state_changed")
+        def on_state_changed(evt) -> None:
+            logger.info(f"[VOICE AGENT] state: {evt.old_state} -> {evt.new_state}")
+
+        @session.on("user_state_changed")
+        def on_user_state_changed(evt) -> None:
+            logger.info(f"[VOICE AGENT] user state: {getattr(evt, 'old_state', '?')} -> {getattr(evt, 'new_state', '?')}")
+
+        @session.on("user_input_transcribed")
+        def on_transcript(evt) -> None:
+            if evt.is_final:
+                logger.info(f"[VOICE AGENT] user said: {evt.transcript!r}")
+
+        @session.on("error")
+        def on_session_error(evt) -> None:
+            logger.error(f"[VOICE AGENT] session error: {evt}")
+
+        # Start the session by connecting it to the LiveKit room with the agent instance
+        logger.info(f"[VOICE AGENT] AgentSession starting in room: {ctx.room.name}")
         try:
-            vad_plugin = silero.VAD.load(
-                min_speech_duration=0.1,
-                min_silence_duration=0.5,
-                force_cpu=True,
-            )
-            _cached_vad = vad_plugin
+            await session.start(room=ctx.room, agent=agent)
+            logger.info("[VOICE AGENT] AgentSession started successfully")
         except Exception as e:
-            logger.error(f"[VOICE AGENT] Failed to initialize Silero VAD: {e}")
+            logger.error(f"[VOICE AGENT] session.start failed: {e}", exc_info=True)
+            return
 
-    # Groq LLM (openai/gpt-oss-120b for low-latency reasoning via Groq)
-    llm_plugin = groq.LLM(
-        model=settings.GROQ_MODEL,
-        api_key=groq_key,
-        temperature=0.2,
-    )
+        # Wait for room_io to complete track publication and handshake with remote participant
+        if session.room_io:
+            try:
+                logger.info("[VOICE AGENT] Waiting for room_io audio tracks to be ready...")
+                await asyncio.wait_for(session.room_io.wait_for_ready(), timeout=5.0)
+                logger.info("[VOICE AGENT] room_io ready — audio tracks published to room")
+            except Exception as e:
+                logger.warning(f"[VOICE AGENT] room_io.wait_for_ready notice (proceeding): {e}")
 
-    # Cartesia TTS (ultra-natural low-latency voice generation)
-    tts_plugin = cartesia.TTS(
-        api_key=cartesia_key,
-        voice=settings.CARTESIA_VOICE_ID,
-        model=settings.CARTESIA_MODEL,
-        sample_rate=24000,
-    )
+        # Build greeting text for this user's role
+        first_name = current_user.name.split()[0]
+        greeting_text = (
+            f"Hello {first_name}! Nova Voice Core is online. How can I help with your ride today?"
+            if current_user.role == "passenger"
+            else f"Hello Commander {first_name}. Driver Voice Copilot is active. What can I check for you?"
+        )
 
-    # Create AgentSession — allow_interruptions removed (deprecated in 1.8.x; default is True)
-    session = AgentSession(
-        stt=stt_plugin,
-        vad=vad_plugin,
-        llm=llm_plugin,
-        tts=tts_plugin,
-    )
-
-    # Create Voice Agent with tools and instructions
-    agent = Agent(
-        instructions=voice_system_prompt,
-        tools=voice_tools,
-    )
-
-    # Register event handlers for structured log output
-    @session.on("agent_state_changed")
-    def on_state_changed(evt) -> None:
-        logger.info(f"[VOICE AGENT] state: {evt.old_state} -> {evt.new_state}")
-
-    @session.on("user_state_changed")
-    def on_user_state_changed(evt) -> None:
-        logger.info(f"[VOICE AGENT] user state: {getattr(evt, 'old_state', '?')} -> {getattr(evt, 'new_state', '?')}")
-
-    @session.on("user_input_transcribed")
-    def on_transcript(evt) -> None:
-        if evt.is_final:
-            logger.info(f"[VOICE AGENT] user said: {evt.transcript!r}")
-
-    @session.on("error")
-    def on_session_error(evt) -> None:
-        logger.error(f"[VOICE AGENT] session error: {evt}")
-
-    # Start the session by connecting it to the LiveKit room with the agent instance
-    logger.info(f"[VOICE AGENT] AgentSession starting in room: {ctx.room.name}")
-    try:
-        await session.start(room=ctx.room, agent=agent)
-        logger.info("[VOICE AGENT] AgentSession started successfully")
-    except Exception as e:
-        logger.error(f"[VOICE AGENT] session.start failed: {e}", exc_info=True)
-        return
-
-    # Wait for room_io to complete track publication and handshake with remote participant
-    if session.room_io:
+        # Trigger initial spoken greeting
+        logger.info(f"[VOICE AGENT] greeting started for {first_name} (role={current_user.role})")
         try:
-            logger.info("[VOICE AGENT] Waiting for room_io audio tracks to be ready...")
-            await asyncio.wait_for(session.room_io.wait_for_ready(), timeout=5.0)
-            logger.info("[VOICE AGENT] room_io ready — audio tracks published to room")
+            speech = session.say(greeting_text)
+            await asyncio.wait_for(speech, timeout=8.0)
+            logger.info("[VOICE AGENT] greeting completed — agent listening for user audio")
         except Exception as e:
-            logger.warning(f"[VOICE AGENT] room_io.wait_for_ready notice (proceeding): {e}")
+            logger.warning(f"[VOICE AGENT] session.say greeting note: {e}, trying generate_reply fallback", exc_info=True)
+            try:
+                reply = session.generate_reply(instructions=f"Greet {first_name} warmly in one short sentence as Nova Voice Copilot.")
+                if asyncio.iscoroutine(reply):
+                    await asyncio.wait_for(reply, timeout=8.0)
+                logger.info("[VOICE AGENT] generate_reply fallback completed")
+            except Exception as e2:
+                logger.error(f"[VOICE AGENT] generate_reply fallback also failed: {e2}")
 
-    # Build greeting text for this user's role
-    first_name = current_user.name.split()[0]
-    greeting_text = (
-        f"Hello {first_name}! Nova Voice Core is online. How can I help with your ride today?"
-        if current_user.role == "passenger"
-        else f"Hello Commander {first_name}. Driver Voice Copilot is active. What can I check for you?"
-    )
+        # AgentSession runs its own background tasks (audio forwarding, VAD, LLM loop).
+        # Wait until the session closes (e.g. participant disconnects) or shutdown is called.
+        close_event = asyncio.Event()
 
-    # Trigger initial spoken greeting
-    logger.info(f"[VOICE AGENT] greeting started for {first_name} (role={current_user.role})")
-    try:
-        speech = session.say(greeting_text)
-        await asyncio.wait_for(speech, timeout=8.0)
-        logger.info("[VOICE AGENT] greeting completed — agent listening for user audio")
-    except Exception as e:
-        logger.warning(f"[VOICE AGENT] session.say greeting note: {e}, trying generate_reply fallback", exc_info=True)
-        try:
-            reply = session.generate_reply(instructions=f"Greet {first_name} warmly in one short sentence as Nova Voice Copilot.")
-            if asyncio.iscoroutine(reply):
-                await asyncio.wait_for(reply, timeout=8.0)
-            logger.info("[VOICE AGENT] generate_reply fallback completed")
-        except Exception as e2:
-            logger.error(f"[VOICE AGENT] generate_reply fallback also failed: {e2}")
+        @session.on("close")
+        def on_session_close(evt):
+            logger.info(f"[VOICE AGENT] AgentSession closed ({getattr(evt, 'reason', 'normal')}), exiting entrypoint")
+            close_event.set()
 
-    # AgentSession runs its own background tasks (audio forwarding, VAD, LLM loop).
-    # Wait until the session closes (e.g. participant disconnects) or shutdown is called.
-    close_event = asyncio.Event()
+        ctx.add_shutdown_callback(lambda: close_event.set())
 
-    @session.on("close")
-    def on_session_close(evt):
-        logger.info(f"[VOICE AGENT] AgentSession closed ({getattr(evt, 'reason', 'normal')}), exiting entrypoint")
-        close_event.set()
+        await close_event.wait()
+        logger.info("[VOICE AGENT] Entrypoint finished cleanly")
 
-    ctx.add_shutdown_callback(lambda: close_event.set())
-
-    await close_event.wait()
-    logger.info("[VOICE AGENT] Entrypoint finished cleanly")
 
 
 def main():
