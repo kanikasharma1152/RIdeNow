@@ -1,8 +1,8 @@
 #!/bin/bash
 # =========================================================================
 # RideNow — Production Startup Script
-# Starts both the FastAPI server (gunicorn) and the LiveKit Voice Agent
-# worker in the same container for single-service deployments (Render free).
+# Runs Uvicorn directly + LiveKit Voice Agent worker in background.
+# Uses direct uvicorn instead of gunicorn to save ~120MB RAM on 512MB hosts.
 # =========================================================================
 
 echo "============================================================"
@@ -19,8 +19,8 @@ else
   echo "  [VOICE] LIVEKIT_URL/API_KEY/API_SECRET not set — skipping voice agent"
 fi
 
-# ── Start FastAPI Server (foreground) ────────────────────────────────────
-echo "  [API]   Starting gunicorn FastAPI server..."
+# ── Start FastAPI Server with direct uvicorn (saves ~120MB RAM) ─────────
+echo "  [API]   Starting uvicorn FastAPI server on port ${PORT:-8000}..."
 echo "============================================================"
 
-exec gunicorn -c gunicorn_conf.py app.main:app
+exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}" --log-level info

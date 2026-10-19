@@ -43,7 +43,6 @@ from app.ai.tools.registry import (
     get_available_tools_for_role,
     TOOL_DEFINITIONS,
 )
-from app.ai.rag.retriever import retrieve_relevant_knowledge, format_knowledge_context
 
 # LiveKit & Plugin imports
 from livekit.agents import JobContext, WorkerOptions, JobExecutorType, cli, llm, JobProcess
@@ -497,11 +496,13 @@ async def entrypoint(ctx: JobContext):
         else f"Hello Commander {first_name}. Driver Voice Copilot is active. What can I check for you?"
     )
 
-    # FIXED: session.say() returns SpeechHandle — 'now=True' is NOT a valid kwarg.
-    # Awaiting the SpeechHandle waits until playout completes.
-    logger.info("[VOICE AGENT] greeting started")
-    await session.say(greeting_text)
-    logger.info("[VOICE AGENT] greeting completed — waiting for user")
+    # Awaiting session.say generates initial voice greeting
+    logger.info(f"[VOICE AGENT] greeting started for {first_name} (role={current_user.role})")
+    try:
+        await session.say(greeting_text)
+        logger.info("[VOICE AGENT] greeting completed — agent listening for user audio")
+    except Exception as e:
+        logger.error(f"[VOICE AGENT] greeting playback error (continuing session): {e}", exc_info=True)
     # AgentSession runs its own background tasks (audio forwarding, VAD, LLM loop).
     # Wait until the session closes (e.g. participant disconnects) or shutdown is called.
     close_event = asyncio.Event()

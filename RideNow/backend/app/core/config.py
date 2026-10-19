@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     @field_validator("GROQ_MODEL", mode="before")
     @classmethod
     def sanitize_groq_model(cls, v: Optional[str]) -> str:
-        if not v or v not in {"openai/gpt-oss-20b", "qwen/qwen3.8-27b"}:
+        if not v or v not in {"openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"}:
             return "openai/gpt-oss-20b"
         return v
     GROQ_TIMEOUT_SECONDS: float = 30.0          # Hard timeout for LLM inference (Phase 14)
