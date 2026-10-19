@@ -1,0 +1,8 @@
+# Always use LF for shell scripts — prevents /bin/bash^M errors on Linux
+*.sh text eol=lf
+
+# Python files — LF
+*.py text eol=lf
+
+# Default: auto line endings for everything else
+* text=auto

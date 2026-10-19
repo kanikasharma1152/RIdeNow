@@ -5,8 +5,6 @@
 # worker in the same container for single-service deployments (Render free).
 # =========================================================================
 
-set -e
-
 echo "============================================================"
 echo "  RIDENOW BACKEND — STARTING"
 echo "============================================================"
