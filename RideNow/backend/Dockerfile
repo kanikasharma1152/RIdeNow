@@ -61,5 +61,11 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health/live || exit 1
 
-# Default command — use gunicorn in production, uvicorn in dev
-CMD ["gunicorn", "-c", "gunicorn_conf.py", "app.main:app"]
+# Copy and permission the startup script (must be done as root before USER ridenow)
+USER root
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+USER ridenow
+
+# Start both FastAPI server + LiveKit voice agent worker
+CMD ["/bin/bash", "/app/start.sh"]
